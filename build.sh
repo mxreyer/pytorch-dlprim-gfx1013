@@ -26,6 +26,13 @@ VENV="$SCRATCH/venv"
 TORCH_VERSION="2.4.0"
 PYTORCH_OCL_WHL="https://github.com/artyom-beilis/pytorch_dlprim/releases/download/0.2.0/pytorch_ocl-0.2.0+torch2.4-cp312-none-linux_x86_64.whl"
 
+# Upstream commits the patches are written against (pytorch_dlprim HEAD of
+# 2025-11-26 and the dlprimitives submodule it points at, 2024-09-04). Pinned
+# so an upstream push cannot silently break the patches; bump deliberately,
+# re-check every `git apply`, and re-run the correctness sweeps in tools/.
+PYTORCH_DLPRIM_COMMIT="1af48d4966d83b5b43344288999343e690ea7037"
+DLPRIMITIVES_COMMIT="ff2d590ab5f8110c1677ec11017bcd8d46618855"
+
 mkdir -p "$SCRATCH"
 
 if [[ -x "$VENV/bin/python3.12" ]]; then
@@ -39,10 +46,18 @@ else
     "$VENV/bin/pip" install -q pybind11 "$PYTORCH_OCL_WHL"
 fi
 
-echo "== cloning pytorch_dlprim (with dlprimitives submodule) =="
+echo "== fetching pytorch_dlprim @ ${PYTORCH_DLPRIM_COMMIT:0:12} (with dlprimitives submodule) =="
 rm -rf "$SCRATCH/src" "$SCRATCH/build"
-git clone --depth 1 --recurse-submodules --shallow-submodules \
-    https://github.com/artyom-beilis/pytorch_dlprim "$SCRATCH/src"
+git init -q "$SCRATCH/src"
+git -C "$SCRATCH/src" fetch -q --depth 1 \
+    https://github.com/artyom-beilis/pytorch_dlprim "$PYTORCH_DLPRIM_COMMIT"
+git -C "$SCRATCH/src" checkout -q FETCH_HEAD
+git -C "$SCRATCH/src" submodule update -q --init --depth 1
+got="$(git -C "$SCRATCH/src/dlprimitives" rev-parse HEAD)"
+if [[ "$got" != "$DLPRIMITIVES_COMMIT" ]]; then
+    echo "dlprimitives submodule is $got, expected $DLPRIMITIVES_COMMIT" >&2
+    exit 1
+fi
 
 echo "== applying patches =="
 # Correctness: rusticl has no work_group_reduce_* (a driver feature gap).

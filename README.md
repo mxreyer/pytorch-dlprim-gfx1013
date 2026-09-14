@@ -102,8 +102,11 @@ virtualenv.
 1. Builds a throwaway Python 3.12 venv in `./scratch/venv/` with the same
    `torch==2.4.0` (CPU) and `pytorch_ocl` 0.2.0 wheel the notebook image
    uses. (Kept between runs; `rm -rf scratch/` to start clean.)
-2. Clones `artyom-beilis/pytorch_dlprim` (with the `dlprimitives`
-   submodule) into `./scratch/src/`, applies the four patches.
+2. Fetches `artyom-beilis/pytorch_dlprim` at the commit pinned in `build.sh`
+   (`PYTORCH_DLPRIM_COMMIT`, with the `dlprimitives` submodule checked
+   against `DLPRIMITIVES_COMMIT`) into `./scratch/src/`, applies the four
+   patches. Bumping the pins is a deliberate step: re-check every
+   `git apply`, rebuild, re-run `tools/wino-repro.py` and `tools/bn-check.py`.
 3. Builds the extension and installs the stripped result at
    `./pt_ocl.so` next to the script.
 
