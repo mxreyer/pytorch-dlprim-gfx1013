@@ -1,8 +1,12 @@
-<!-- The pt_ocl.so attached to each release here is what the notebook image in
-     https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s installs (pinned by
-     URL + sha256 in its Dockerfile). To ship a new build: run ./build.sh, tag a
-     release with pt_ocl.so attached, then bump the version and sha256 there. -->
 # pytorch_dlprim on gfx1013 (AMD BC-250, Mesa rusticl)
+
+The `pt_ocl.so` attached to each
+[release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases) of this
+repository is what the notebook image in
+[bc250-jupyterhub-opencl-k3s](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s)
+installs, pinned by URL and sha256 in its Dockerfile. To ship a new build: run
+`./build.sh`, tag a release with `pt_ocl.so` attached, then bump the version
+and sha256 there.
 
 Patches and a build script that make
 [pytorch_dlprim](https://github.com/artyom-beilis/pytorch_dlprim) (`pytorch_ocl`,
