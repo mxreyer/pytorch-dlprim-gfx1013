@@ -1,0 +1,64 @@
+diff --git a/src/pointwise_ops.cpp b/src/pointwise_ops.cpp
+index 5503148..0a6e519 100644
+--- a/src/pointwise_ops.cpp
++++ b/src/pointwise_ops.cpp
+@@ -565,7 +565,7 @@ using c10::DeviceType;
+         dlprim::Tensor Y(todp(out));
+         double w0 = min_val.toDouble();
+         double w1 = max_val.toDouble();
+-        dlprim::core::pointwise_operation({X},{Y},{w0,w1},"y0=max(w0,min(w1,x0));",getExecutionContext(self));
++        dlprim::core::pointwise_operation({X},{Y},{w0,w1},"y0=max((dtype)(w0),min((dtype)(w1),x0));",getExecutionContext(self));
+         sync_if_needed(self.device());
+         return out;
+     }
+@@ -579,7 +579,7 @@ using c10::DeviceType;
+         dlprim::Tensor X=todp(self_c);
+         double w0 = min_val.toDouble();
+         double w1 = max_val.toDouble();
+-        dlprim::core::pointwise_operation({X},{X},{w0,w1},"y0=max(w0,min(w1,x0));",getExecutionContext(self));
++        dlprim::core::pointwise_operation({X},{X},{w0,w1},"y0=max((dtype)(w0),min((dtype)(w1),x0));",getExecutionContext(self));
+         if(!self.is_contiguous())
+             self.copy_(self_c);
+         sync_if_needed(self.device());
+@@ -592,12 +592,14 @@ using c10::DeviceType;
+         GUARD;
+         Tensor self_c = self.contiguous();
+         dlprim::Tensor X  = todp(self_c);
+-        dlprim::Tensor dY = todp(grad_output);
++        // grad_output is an expanded (non-contiguous) tensor after .sum().backward()
++        Tensor grad_c = grad_output.contiguous();
++        dlprim::Tensor dY = todp(grad_c);
+         Tensor result = new_tensor_as(X.shape(),self);
+         dlprim::Tensor dX = todp(result);
+         double w0 = min_val.toDouble();
+         double w1 = max_val.toDouble();
+-        dlprim::core::pointwise_operation({X,dY},{dX},{w0,w1},"y0 = (w0 <= x0 && x0 <= w1) ? x1 : 0;",getExecutionContext(self));
++        dlprim::core::pointwise_operation({X,dY},{dX},{w0,w1},"y0 = ((dtype)(w0) <= x0 && x0 <= (dtype)(w1)) ? x1 : (dtype)(0);",getExecutionContext(self));
+         sync_if_needed(self.device());
+         return result;
+     }
+@@ -1280,7 +1282,7 @@ using c10::DeviceType;
+         dlprim::Tensor X = todp(self_c);
+         auto q = getExecutionContext(self);
+         if(min && max)
+-            dlprim::core::pointwise_operation({X},{Y},{min->to<double>(),max->to<double>()},"y0 = max(w0,min(w1,x0));",q);
++            dlprim::core::pointwise_operation({X},{Y},{min->to<double>(),max->to<double>()},"y0 = max((dtype)(w0),min((dtype)(w1),x0));",q);
+         else if(min)
+             dlprim::core::pointwise_operation({X},{Y},{min->to<double>()},"y0 = max(w0,x0);",q);
+         else if(max)
+diff --git a/src/vision_ops.cpp b/src/vision_ops.cpp
+index 1358b5c..d24bc91 100644
+--- a/src/vision_ops.cpp
++++ b/src/vision_ops.cpp
+@@ -69,6 +69,11 @@ using c10::DeviceType;
+                                     int64_t groups)
+     {
+         GUARD;
++        // dlprimitives' convolution kernels are fp32 only; a half tensor used
++        // to go through as raw bytes and come back as NaN. Fail loudly.
++        TORCH_CHECK(input.scalar_type() == c10::kFloat && weight.scalar_type() == c10::kFloat,
++                    "ocl convolution supports float32 tensors only (got ", input.scalar_type(),
++                    "). For fp16 arithmetic on float32 tensors set DLPRIM_CONV_FP16=1.");
+         Tensor X_tmp = input.contiguous();
+         dlprim::Tensor X = todp(X_tmp);
+         dlprim::Tensor W = todp(weight);

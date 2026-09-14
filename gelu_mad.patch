@@ -1,0 +1,39 @@
+diff --git a/src/pointwise_ops.cpp b/src/pointwise_ops.cpp
+index 5503148..0a6e519 100644
+--- a/src/pointwise_ops.cpp
++++ b/src/pointwise_ops.cpp
+@@ -1362,14 +1364,21 @@ using c10::DeviceType;
+         // 0.7071067811865475 = 1/sqrt(2)
+         
+         if(approximate == "tanh")
++            // NOTE: mad(), not fma(). These strings become a single #define, so
++            // they cannot carry // comments. On rusticl, libclc has no hardware
++            // fma for float: fma() expands to __clc_sw_fma, a ~563 instruction
++            // software float emulation that measures ~115x slower than a native
++            // v_fma_f32. mad() lowers to the native instruction. GELU is an
++            // approximation to begin with, so mad()'s weaker rounding guarantee
++            // (it may round the intermediate product) is irrelevant here.
+             eq = R"xxx(
+                 dtype alpha = 1.128379167095512558561f * 0.7071067811865475f;
+                 dtype koeff = 0.044715f;
+                 dtype beta  = alpha * koeff * 3.0f;
+-                dtype Y = tanh(alpha * fma(koeff,x0*x0*x0,x0));
+-                y0 = 0.5f * x1 * fma(
+-                    fma(-x0,Y * Y, x0),
+-                    fma(beta,x0*x0,alpha),
++                dtype Y = tanh(alpha * mad(koeff,x0*x0*x0,x0));
++                y0 = 0.5f * x1 * mad(
++                    mad(-x0,Y * Y, x0),
++                    mad(beta,x0*x0,alpha),
+                     1 + Y                  
+                 );
+             )xxx";
+@@ -1377,7 +1386,7 @@ using c10::DeviceType;
+             eq = R"xxx(
+                 dtype alpha = 1.128379167095512558561f * 0.7071067811865475f * 0.5f; 
+                 dtype cdf = 0.5f * (1.0f + erf(x0 * 0.7071067811865475f));
+-                y0 = x1 * fma(
++                y0 = x1 * mad(
+                     alpha * x0,
+                     exp(-0.5f * x0*x0),
+                     cdf);

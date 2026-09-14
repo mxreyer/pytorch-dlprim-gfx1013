@@ -1,0 +1,8 @@
+# build.sh scratch venv + clone + build tree
+/scratch/
+# build product; published as a release asset, not tracked
+/pt_ocl.so
+# cached CPU reference gradients for tools/wino-repro.py
+/tools/wino-repro-refs*.pt
+__pycache__/
+*.pyc

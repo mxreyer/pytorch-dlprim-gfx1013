@@ -1,0 +1,18 @@
+diff --git a/src/kernels/reduce.h b/src/kernels/reduce.h
+index 5b2ab19..1d252ec 100644
+--- a/src/kernels/reduce.h
++++ b/src/kernels/reduce.h
+@@ -6,7 +6,12 @@
+ ///
+ ///////////////////////////////////////////////////////////////////////////////
+ #ifndef CUSTOM_REDUCE
+-#define CUSTOM_REDUCE 0
++// Forced on for BC-250 (Fedora rusticl, upstream libclc): the OpenCL 2.0
++// work_group_reduce_add/max builtins below are only available when rusticl
++// detects Mesa's own patched libclc, which Fedora doesn't ship. This falls
++// back to the portable local-memory reduction, which needs nothing beyond
++// OpenCL 1.2. See pytorch-dlprim-fix/README.md for the full story.
++#define CUSTOM_REDUCE 1
+ #endif
+ 
+ #define my_get_local_wg_id() ((get_local_id(2) * get_local_size(1) * get_local_size(0)) + (get_local_id(1) * get_local_size(0)) + get_local_id(0))

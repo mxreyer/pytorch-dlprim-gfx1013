@@ -1,0 +1,100 @@
+--- a/src/amd/compiler/aco_insert_waitcnt.cpp
++++ b/src/amd/compiler/aco_insert_waitcnt.cpp
+@@ -484,6 +484,15 @@
+    ctx.bar_nonempty |= 1 << dst_index;
+ }
+ 
++static bool
++lds_barrier_wait_forced()
++{
++   static int v = -1;
++   if (v < 0)
++      v = getenv("ACO_LDS_BARRIER_WAIT") ? 1 : 0;
++   return v == 1;
++}
++
+ void
+ finish_barrier_internal(wait_ctx& ctx, wait_imm& imm, depctr_wait& depctr, Instruction* instr,
+                         struct barrier_info* info, unsigned storage_idx)
+@@ -504,9 +513,11 @@
+          vm_vsrc |= is_barrier && ctx.gfx_level >= GFX10;
+       }
+ 
+-      /* Similar for LDS. */
++      /* Similar for LDS. Experiment: with ACO_LDS_BARRIER_WAIT set, control barriers
++       * wait for LDS completion (lgkmcnt(0)) instead; gfx1013 reads stale LDS otherwise. */
+       if ((events & event_lds) &&
+-          (is_lds || (is_barrier && ctx.gfx_level >= GFX10 && !ctx.program->wgp_mode))) {
++          (is_lds || (is_barrier && ctx.gfx_level >= GFX10 && !ctx.program->wgp_mode &&
++                      !lds_barrier_wait_forced()))) {
+          events &= ~event_lds;
+          vm_vsrc |= is_barrier;
+       }
+--- a/src/amd/compiler/aco_insert_NOPs.cpp
++++ b/src/amd/compiler/aco_insert_NOPs.cpp
+@@ -884,12 +884,62 @@
+ 
+    Builder bld(state.program, &new_instructions);
+ 
++   /* Experiment: ACO_FORCE_NOP_MASK inserts s_nop <ACO_FORCE_NOP_N> before every
++    * instruction of the selected classes: 1 VALU, 2 SALU, 4 VMEM/FLAT, 8 DS,
++    * 16 SMEM, 32 SOPP/branch, 64 anything else. */
++   {
++      static int nop_mask = -1, nop_n = 0;
++      if (nop_mask < 0) {
++         const char* m = getenv("ACO_FORCE_NOP_MASK");
++         nop_mask = m ? (int)strtoul(m, NULL, 0) : 0;
++         const char* n = getenv("ACO_FORCE_NOP_N");
++         nop_n = n ? atoi(n) : 0;
++      }
++      /* ACO_FORCE_NOP_AFTER_WAITCNT=N: s_nop N-1 right after every s_waitcnt
++       * (i.e. before the first instruction that follows a wait). 0 = off. */
++      static int nop_after_wait = -1;
++      static bool prev_was_waitcnt = false;
++      if (nop_after_wait < 0) {
++         const char* w = getenv("ACO_FORCE_NOP_AFTER_WAITCNT");
++         nop_after_wait = w ? atoi(w) : 0;
++      }
++      if (nop_after_wait > 0) {
++         bool is_wait = instr->opcode == aco_opcode::s_waitcnt ||
++                        instr->opcode == aco_opcode::s_waitcnt_vscnt ||
++                        instr->opcode == aco_opcode::s_waitcnt_vmcnt ||
++                        instr->opcode == aco_opcode::s_waitcnt_expcnt ||
++                        instr->opcode == aco_opcode::s_waitcnt_lgkmcnt;
++         if (prev_was_waitcnt && !is_wait)
++            bld.sopp(aco_opcode::s_nop, nop_after_wait - 1);
++         prev_was_waitcnt = is_wait;
++      }
++      if (nop_mask) {
++         unsigned cls;
++         if (instr->isVALU()) cls = 1;
++         else if (instr->isSALU()) cls = 2;
++         else if (instr->isVMEM() || instr->isFlatLike()) cls = 4;
++         else if (instr->isDS()) cls = 8;
++         else if (instr->isSMEM()) cls = 16;
++         else if (instr->isSOPP()) cls = 32;
++         else cls = 64;
++         if (nop_mask & cls)
++            bld.sopp(aco_opcode::s_nop, nop_n);
++      }
++   }
++
+    unsigned vm_vsrc = 7;
+    unsigned sa_sdst = 1;
+    if (debug_flags & DEBUG_FORCE_WAITDEPS) {
+-      bld.sopp(aco_opcode::s_waitcnt_depctr, 0x0000);
+-      vm_vsrc = 0;
+-      sa_sdst = 0;
++      /* Experiment: ACO_FORCE_DEPCTR_IMM selects which depctr fields the forced
++       * wait zeroes (default 0x0000 = all). */
++      static int imm = -1;
++      if (imm < 0) {
++         const char* e = getenv("ACO_FORCE_DEPCTR_IMM");
++         imm = e ? (int)strtoul(e, NULL, 0) : 0;
++      }
++      bld.sopp(aco_opcode::s_waitcnt_depctr, imm);
++      vm_vsrc = (imm >> 2) & 0x7;
++      sa_sdst = imm & 0x1;
+    } else if (instr->opcode == aco_opcode::s_waitcnt_depctr) {
+       vm_vsrc = (instr->salu().imm >> 2) & 0x7;
+       sa_sdst = instr->salu().imm & 0x1;

@@ -1,0 +1,1425 @@
+diff --git a/src/core/activation.cpp b/src/core/activation.cpp
+index 3d6045d..fbf2798 100644
+--- a/src/core/activation.cpp
++++ b/src/core/activation.cpp
+@@ -13,8 +13,13 @@ namespace core {
+     void activation_forward(Tensor &x,Tensor &y,StandardActivations activation, ExecutionContext const &ec)
+     {
+         Context ctx(ec);
++        // The kernel is templated on dtype through this define; without it a
++        // half tensor was processed as float bytes (relu on half returned
++        // garbage).
++        DLPRIM_CHECK(x.dtype() == y.dtype());
+         cl::Program const &prog = gpu::Cache::instance().get_program(ctx,"activation",
+-                                                    "ACTIVATION",int(activation));
++                                                    "ACTIVATION",int(activation),
++                                                    "dtype",data_type_to_opencl_type(x.dtype()));
+         cl::Kernel k(prog,"activation");
+ 
+         int p=0;
+@@ -30,8 +35,10 @@ namespace core {
+     void activation_backward(Tensor &dx,Tensor &dy,Tensor &y,StandardActivations activation,float beta,ExecutionContext const &ec)
+     {
+         Context ctx(ec);
++        DLPRIM_CHECK(y.dtype() == dy.dtype() && y.dtype() == dx.dtype());
+         cl::Program const &prog = gpu::Cache::instance().get_program(ctx,"activation",
+-                                                    "ACTIVATION",int(activation));
++                                                    "ACTIVATION",int(activation),
++                                                    "dtype",data_type_to_opencl_type(y.dtype()));
+         cl::Kernel k(prog,"activation_diff");
+         
+         
+diff --git a/src/core/conv.cpp b/src/core/conv.cpp
+index b090e4c..48de716 100644
+--- a/src/core/conv.cpp
++++ b/src/core/conv.cpp
+@@ -9,6 +9,13 @@
+ #include <dlprim/core/bias.hpp>
+ #include <dlprim/core/common.hpp>
+ #include <dlprim/gpu/gemm.hpp>
++#include <cstdlib>
++#include <algorithm>
++#include <cstdio>
++#include <cstring>
++#include <vector>
++#include <cmath>
++#include <map>
+ #include <dlprim/gpu/program_cache.hpp>
+ #include <iostream>
+ 
+@@ -220,6 +227,32 @@ namespace core {
+     };
+ 
+ 
++
++    // The atomics-free Winograd backward paths below (planes instead of emulated
++    // fp32 atomics) are on by default. They spent two weeks behind an interlock
++    // because they showed a rare wrong gradient on the BC-250; that turned out
++    // to be the GPU clock governor's idle-floor voltage (1000 MHz at 718 mV),
++    // not the kernels and not the compiler - 66/100 sweeps bad pinned at that
++    // point, 0/900 with the voltage back at the shipped default. See
++    // ../../../OPENCL-PERF.md, Finding 3. DLPRIM_WINOGRAD_BWD_PLANES=0 /
++    // DLPRIM_WINOGRAD_SPLIT_PLANES=0 select the atomic paths for comparison.
++    static bool env_enabled(char const *name,bool def)
++    {
++        char const *e = getenv(name);
++        return e && *e ? atoi(e) != 0 : def;
++    }
++    // DLPRIM_CONV_FP16=1: the three Winograd kernels keep their LDS tiles and
++    // run their register-tile GEMM in fp16 (packed v_pk_fma_f16, twice the
++    // fp32 rate on RDNA), with fp16 accumulation over one work-group's K
++    // slice. Tensors in global memory stay fp32. Measured on the BC-250:
++    // forward 15.0 -> 8.9 ms, backward-data 16.0 -> 10.2, backward-filter
++    // 19.4 -> 12.4 per ResNet-9 step; Y/dX within ~0.5% of fp32, dW ~0.5%
++    // with the shorter K slices below. Off by default: fp32 callers get fp32.
++    static bool conv_fp16()
++    {
++        return env_enabled("DLPRIM_CONV_FP16",false);
++    }
++
+     class Conv2DForwardWinograd : public Conv2DForward {
+     public:
+         virtual char const *algo() const
+@@ -278,6 +311,14 @@ namespace core {
+         {
+             int off = ctx.is_amd() ? 0 : 1;
+             int toff = 1;
++            // BC-250 investigation: STRIDE_OFFSET is the LDS padding that keeps
++            // rows off the same bank. Hardcoding it to 0 for AMD leaves the
++            // stride at XTILES_IN_WG*WG_K = 256 floats, an exact multiple of
++            // the 32 LDS banks. Overridable so the choice can be measured.
++            if(char const *e = getenv("DLPRIM_WINOGRAD_STRIDE_OFFSET"))
++                off = atoi(e);
++            if(char const *e = getenv("DLPRIM_WINOGRAD_TR_OFFSET"))
++                toff = atoi(e);
+             int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
+             if(local_mem_size < 40960) {
+                 off = 0;
+@@ -287,6 +328,7 @@ namespace core {
+                                             "ACTIVATION",int(activation),
+                                             "STRIDE_OFFSET",off,
+                                             "TR_STRIDE_OFFSET",toff,
++                                            "HALF_GEMM",conv_fp16() ? 1 : 0,
+                                             "BIAS",int(bias));
+             conv_kernel_ = cl::Kernel(prog,"winconv_calc_gkgt_3x3");
+             conv_ = cl::Kernel(prog,"winconv_3x3");
+@@ -302,25 +344,58 @@ namespace core {
+         {
+             return "winograd";
+         }
+-        virtual size_t workspace()
+-        {
+-            return sizeof(float)*16 * config_.channels_in * config_.channels_out;
+-        }
+         Conv2DBackwardDataWinograd(Context &ctx,Conv2DSettings const &config) :
+             config_(config),
+             s_(ctx,config.dtype)
+         {
++            // Winograd backward-data accumulates because its 4x4 tiles overlap,
++            // and on a device without a hardware fp32 atomic add that
++            // accumulation is a compare-and-swap retry loop. Splitting the
++            // tiles into their four row/column parity classes makes the writes
++            // disjoint, at the cost of four planes of the gradient in the
++            // workspace. Fall back to atomics when that would be too large.
++            plane_elems_ = size_t(config.shape[0]) * config.channels_in
++                         * size_t(config.shape[2]) * size_t(config.shape[3]);
++            // On by default (see the note above env_enabled); the four planes
++            // must fit the workspace budget.
++            size_t budget = 256u << 20;
++            use_planes_ = env_enabled("DLPRIM_WINOGRAD_BWD_PLANES",true)
++                       && (4 * plane_elems_ * sizeof(float)) <= budget;
++
+             int off = ctx.is_amd() ? 0 : 1;
+             int toff = 1;
++            // BC-250 investigation: STRIDE_OFFSET is the LDS padding that keeps
++            // rows off the same bank. Hardcoding it to 0 for AMD leaves the
++            // stride at XTILES_IN_WG*WG_K = 256 floats, an exact multiple of
++            // the 32 LDS banks. Overridable so the choice can be measured.
++            if(char const *e = getenv("DLPRIM_WINOGRAD_STRIDE_OFFSET"))
++                off = atoi(e);
++            if(char const *e = getenv("DLPRIM_WINOGRAD_TR_OFFSET"))
++                toff = atoi(e);
+             int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
+             if(local_mem_size < 40960) {
+                 off = 0;
+                 toff = 0;
+             }
+             cl::Program const &prog = gpu::Cache::instance().get_program(ctx,"winograd_bwd_data",
+-                        "STRIDE_OFFSET",off,"TR_STRIDE_OFFSET",toff);
++                        "STRIDE_OFFSET",off,"TR_STRIDE_OFFSET",toff,
++                        "USE_PLANES",int(use_planes_),
++                        "HALF_GEMM",conv_fp16() ? 1 : 0);
+             conv_kernel_bwd_ = cl::Kernel(prog,"winconv_calc_gkgt_3x3");
+             bw_conv_data_ = cl::Kernel(prog,"winconv_3x3_bwd_data");
++            if(use_planes_)
++                reduce_ = cl::Kernel(prog,"winconv_3x3_bwd_data_reduce");
++        }
++        size_t filter_ws_elems() const
++        {
++            return size_t(16) * config_.channels_in * config_.channels_out;
++        }
++        virtual size_t workspace()
++        {
++            size_t elems = filter_ws_elems();
++            if(use_planes_)
++                elems += 4 * plane_elems_;
++            return sizeof(float) * elems;
+         }
+         virtual void enqueue(Tensor &dx,Tensor &K,Tensor &dy,Tensor &ws_bytes,float factor,ExecutionContext const &ec)
+         {
+@@ -335,7 +410,11 @@ namespace core {
+             int w = dx.shape()[3];
+ 
+             int p=0;
+-            Tensor ws = ws_bytes.workspace_as_type(float_data);
++            Tensor all_ws = ws_bytes.workspace_as_type(float_data);
++            Tensor ws = all_ws.sub_tensor(0,Shape(filter_ws_elems()),float_data);
++            Tensor planes;
++            if(use_planes_)
++                planes = all_ws.sub_tensor(filter_ws_elems(),Shape(4*plane_elems_),float_data);
+ 
+             conv_kernel_bwd_.setArg(p++,config_.channels_out);
+             conv_kernel_bwd_.setArg(p++,config_.channels_in);
+@@ -349,25 +428,53 @@ namespace core {
+             bw_conv_data_.setArg(p++,h);
+             bw_conv_data_.setArg(p++,w);
+ 
+-            dx.set_arg(bw_conv_data_,p);
++            if(use_planes_)
++                planes.set_arg(bw_conv_data_,p);
++            else
++                dx.set_arg(bw_conv_data_,p);
+             ws.set_arg(bw_conv_data_,p);
+             dy.set_arg(bw_conv_data_,p);
+             
+-            s_.enqueue(factor,dx,ec1);
++            // With planes there is nothing to pre-scale: the reduce applies
++            // beta and masks the border elements no tile of a parity class
++            // writes (it used to need a zero-fill of all four planes here).
++            if(!use_planes_)
++                s_.enqueue(factor,dx,ec1);
+ 
+             cl::NDRange l1(8,8);
+             cl::NDRange g1 = gpu::round_range(config_.channels_out,config_.channels_in,l1);
+-            ec.queue().enqueueNDRangeKernel(conv_kernel_bwd_,cl::NullRange,g1,l1,ec2.events(),ec2.event("winograd_3to4_kernel"));
++            // first launch of the series carries the incoming dependencies
++            ExecutionContext &ec_first = use_planes_ ? ec1 : ec2;
++            ec.queue().enqueueNDRangeKernel(conv_kernel_bwd_,cl::NullRange,g1,l1,ec_first.events(),ec_first.event("winograd_3to4_kernel"));
+ 
+             cl::NDRange l2(256,1);
+             int tiles = ((w + 1) / 2 * (h + 1) / 2 * B + 31)/32;
+             cl::NDRange g2(tiles * 256,(C + 31) / 32);
+-            ec.queue().enqueueNDRangeKernel(bw_conv_data_,cl::NullRange,g2,l2,ec.events(),ec2.event("winograd_3x3_main_bwd"));
++            ec.queue().enqueueNDRangeKernel(bw_conv_data_,cl::NullRange,g2,l2,
++                                            use_planes_ ? ec2.events() : ec.events(),
++                                            ec2.event("winograd_3x3_main_bwd"));
++
++            if(use_planes_) {
++                int total = int(plane_elems_);
++                int rp=0;
++                reduce_.setArg(rp++,total);
++                reduce_.setArg(rp++,h);
++                reduce_.setArg(rp++,w);
++                dx.set_arg(reduce_,rp);
++                planes.set_arg(reduce_,rp);
++                reduce_.setArg(rp++,factor);
++                size_t lr = 256;
++                size_t gr = (size_t(total) + lr - 1) / lr * lr;
++                ec.queue().enqueueNDRangeKernel(reduce_,cl::NullRange,cl::NDRange(gr),cl::NDRange(lr),
++                                                ec3.events(),ec3.event("winograd_3x3_main_bwd_reduce"));
++            }
+         }
+     private:
+         Conv2DSettings config_;
+         Scale s_;
+-        cl::Kernel conv_kernel_bwd_, bw_conv_data_;
++        cl::Kernel conv_kernel_bwd_, bw_conv_data_, reduce_;
++        bool use_planes_;
++        size_t plane_elems_;
+     };
+ 
+     class Conv2DBackwardFilterWinograd: public Conv2DBackwardFilter  {
+@@ -383,40 +490,187 @@ namespace core {
+         {
+             int h = config.shape[2];
+             int w = config.shape[3];
+-            int winograd_work_items = (config_.channels_in / 32) * (config_.channels_out / 32) * 256;
+-            reduce_k_ = winograd_work_items < ctx.estimated_core_count();
++            // --- BC-250 investigation -------------------------------------
++            // Stock rule: split the K (batch*tiles) reduction 8 ways only when
++            // (C/32)*(N/32)*256 < estimated_core_count(). On a 40 CU AMD part
++            // that is 2560 work items = 10 work-groups, so any conv with >=10
++            // work-groups runs unsplit -- including 128->128, which launches
++            // exactly 16 work-groups onto 40 CUs and leaves 24 idle.
++            // Pick the split from how many work-groups the launch actually has
++            // versus how many CUs there are to fill.
++            int wg_count = ((config_.channels_in + 31) / 32)
++                         * ((config_.channels_out + 31) / 32);
++            int cu = ctx.device().getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>();
++            k_split_ = 1;
++            char const *ks_env = getenv("DLPRIM_WINOGRAD_KSPLIT");
++            if(ks_env && !strcmp(ks_env,"stock")) {
++                // reproduce the upstream rule, for A/B measurement
++                int winograd_work_items = (config_.channels_in / 32) * (config_.channels_out / 32) * 256;
++                k_split_ = (winograd_work_items < ctx.estimated_core_count()) ? 8 : 1;
++            }
++            else if(ks_env && *ks_env) {
++                k_split_ = atoi(ks_env);
++                if(k_split_ < 1)
++                    k_split_ = 1;
++            }
++            else {
++                // aim for >= 4 work-groups per CU so the tail is cheap. More
++                // splitting does not help (measured 2026-09-10: targets of 8,
++                // 16 and 32 per CU, caps to 64, all within noise of this), the
++                // kernel is not short of work-groups. Overridable for
++                // measurement: DLPRIM_WINOGRAD_KSPLIT_TARGET (per CU, default 4),
++                // DLPRIM_WINOGRAD_KSPLIT_MAX (cap, default 16).
++                // With the fp16 inner loop, shorter K slices halve the
++                // accumulation error (dW 1.1% -> 0.5%) at no measured cost.
++                int per_cu = conv_fp16() ? 16 : 4, cap = conv_fp16() ? 64 : 16;
++                if(char const *e = getenv("DLPRIM_WINOGRAD_KSPLIT_TARGET"))
++                    per_cu = std::max(1,atoi(e));
++                if(char const *e = getenv("DLPRIM_WINOGRAD_KSPLIT_MAX"))
++                    cap = std::max(1,atoi(e));
++                int target = cu * per_cu;
++                while(k_split_ < cap && wg_count * k_split_ < target)
++                    k_split_ *= 2;
++                // never split further than there is K work to split
++                int k_work = config.shape[0] * ((h + 1) / 2) * ((w + 1) / 2);
++                while(k_split_ > 1 && k_work / k_split_ < 16)
++                    k_split_ /= 2;
++            }
++            // Each split needs its own plane of the filter gradient in the
++            // workspace. Keep that bounded for wide layers: 9*C*N floats per
++            // split is 36 MB per split at C=N=1024.
++            {
++                size_t plane = size_t(9) * config_.channels_in
++                             * config_.channels_out * sizeof(float);
++                size_t budget = 64u << 20;
++                while(k_split_ > 1 && plane * size_t(k_split_) > budget)
++                    k_split_ /= 2;
++            }
++            reduce_k_ = k_split_ > 1;
+             int off = ctx.is_amd() ? 0 : 1;
+             int toff = 1;
++            // BC-250 investigation: STRIDE_OFFSET is the LDS padding that keeps
++            // rows off the same bank. Hardcoding it to 0 for AMD leaves the
++            // stride at XTILES_IN_WG*WG_K = 256 floats, an exact multiple of
++            // the 32 LDS banks. Overridable so the choice can be measured.
++            if(char const *e = getenv("DLPRIM_WINOGRAD_STRIDE_OFFSET"))
++                off = atoi(e);
++            if(char const *e = getenv("DLPRIM_WINOGRAD_TR_OFFSET"))
++                toff = atoi(e);
+             int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
+             if(local_mem_size < 40960) {
+                 off = 0;
+                 toff = 0;
+             }
++            // On by default (see the note above env_enabled).
++            use_split_planes_ = env_enabled("DLPRIM_WINOGRAD_SPLIT_PLANES",true);
+             cl::Program const &prog = gpu::Cache::instance().get_program(ctx,"winograd_bwd_filter",
+                                                                             "IMG_H",h,"IMG_W",w,
+                                                                             "STRIDE_OFFSET",off,
+-                                                                            "TR_STRIDE_OFFSET",toff);
++                                                                            "TR_STRIDE_OFFSET",toff,
++                                                                            "USE_SPLIT_PLANES",int(use_split_planes_),
++                                                                            "HALF_GEMM",conv_fp16() ? 1 : 0);
+             bw_conv_filter_ = cl::Kernel(prog,"winconv_3x3_bwd_filter");
++            if(k_split_ > 1 && use_split_planes_)
++                reduce_ = cl::Kernel(prog,"winconv_3x3_bwd_filter_reduce");
+         }
+-        virtual void enqueue(Tensor &x,Tensor &dK,Tensor &dy,Tensor &,float factor,ExecutionContext const &ec) 
++        // With split-K each slice writes its own plane of the workspace and a
++        // second pass sums them, instead of every slice fighting over the same
++        // filter element through an emulated atomic add.
++        virtual size_t workspace()
++        {
++            if(k_split_ <= 1 || !use_split_planes_)
++                return 0;
++            return size_t(k_split_) * 9 * size_t(config_.channels_in)
++                 * size_t(config_.channels_out) * sizeof(float);
++        }
++        virtual void enqueue(Tensor &x,Tensor &dK,Tensor &dy,Tensor &ws_bytes,float factor,ExecutionContext const &ec) 
+         {
+             int B = x.shape()[0];
+             int N = config_.channels_out;
+             int C = config_.channels_in;
++            bool split = k_split_ > 1 && use_split_planes_;
++            Tensor partials;
++            if(split)
++                partials = ws_bytes.workspace_as_type(float_data);
++
+             int p=0;
+             bw_conv_filter_.setArg(p++,B);
+             bw_conv_filter_.setArg(p++,N);
+             bw_conv_filter_.setArg(p++,C);
+             x.set_arg(bw_conv_filter_,p);
+-            dK.set_arg(bw_conv_filter_,p);
++            if(split)
++                partials.set_arg(bw_conv_filter_,p);
++            else
++                dK.set_arg(bw_conv_filter_,p);
+             dy.set_arg(bw_conv_filter_,p);
+             bw_conv_filter_.setArg(p++,factor);
+             
+             cl::NDRange wg(256,1,1);
+             int g1 = 256 * ((C+31)/32);
+             int g2 = (N+31)/32;
+-            cl::NDRange gr(g1,g2,reduce_k_ ? 8 : 1);
+-            if(reduce_k_) {
++            cl::NDRange gr(g1,g2,k_split_);
++            if(split) {
++                ExecutionContext ec1 = ec.generate_series_context(0,2);
++                ExecutionContext ec2 = ec.generate_series_context(1,2);
++                ec.queue().enqueueNDRangeKernel(bw_conv_filter_,cl::NullRange,gr,wg,ec1.events(),ec1.event("winograd_bwd_filter"));
++
++                // DLPRIM_DEBUG_PARTIALS_HASH: the diagnostic that located the
++                // rare wrong dW. The partials must be bit-identical across runs
++                // with identical inputs; this reads them back and reports the
++                // first divergence. See OPENCL-PERF.md, Finding 3.
++                if(getenv("DLPRIM_DEBUG_PARTIALS_HASH")) {
++                    ec.queue().finish();
++                    size_t plane = 9 * size_t(C) * size_t(N);
++                    size_t n = size_t(k_split_) * plane;
++                    std::vector<float> host(n);
++                    ec.queue().enqueueReadBuffer(partials.device_buffer(),CL_TRUE,
++                        size_t(partials.device_offset())*sizeof(float),
++                        n*sizeof(float),host.data());
++                    static std::map<std::string,std::vector<float> > ref;
++                    char key[64];
++                    snprintf(key,sizeof key,"%d->%d/k%d",C,N,k_split_);
++                    auto it = ref.find(key);
++                    if(it == ref.end()) {
++                        ref[key] = host;
++                    }
++                    else if(host != it->second) {
++                        std::vector<float> const &r = it->second;
++                        size_t ndiff = 0, first = 0;
++                        std::vector<size_t> per(k_split_,0);
++                        double maxrel = 0;
++                        bool first_set = false;
++                        for(size_t i=0;i<n;i++) {
++                            if(host[i] != r[i]) {
++                                if(!first_set) { first = i; first_set = true; }
++                                ndiff++;
++                                per[i/plane]++;
++                                double d = std::fabs(double(host[i]) - double(r[i]));
++                                if(d > maxrel) maxrel = d;
++                            }
++                        }
++                        fprintf(stderr,"PARTIALS-DIFF %s: %zu of %zu differ; per-plane[",key,ndiff,n);
++                        for(int z=0;z<k_split_;z++) fprintf(stderr,"%zu%s",per[z],z+1<k_split_?",":"");
++                        size_t fi = first % plane;
++                        fprintf(stderr,"]; first idx=%zu (plane %zu, ch_out=%zu ch_in=%zu tap=%zu)",
++                                first, first/plane, (fi/9)/size_t(C), (fi/9)%size_t(C), fi%9);
++                        fprintf(stderr,"; got=%.6e want=%.6e maxdiff=%.3e\n",
++                                host[first], r[first], maxrel);
++                    }
++                }
++                int total = 9 * C * N;
++                int rp=0;
++                reduce_.setArg(rp++,total);
++                reduce_.setArg(rp++,k_split_);
++                dK.set_arg(reduce_,rp);
++                partials.set_arg(reduce_,rp);
++                reduce_.setArg(rp++,factor);
++                size_t lr = 256;
++                size_t gr2 = (size_t(total) + lr - 1) / lr * lr;
++                ec.queue().enqueueNDRangeKernel(reduce_,cl::NullRange,cl::NDRange(gr2),cl::NDRange(lr),
++                                                ec2.events(),ec2.event("winograd_bwd_filter_reduce"));
++            }
++            else if(k_split_ > 1) {
++                // atomic accumulate across slices: dK must be pre-scaled
+                 ExecutionContext ec1 = ec.generate_series_context(0,2);
+                 ExecutionContext ec2 = ec.generate_series_context(1,2);
+                 s_.enqueue(factor,dK,ec1);
+@@ -430,7 +684,10 @@ namespace core {
+         Conv2DSettings config_;
+         Scale s_;
+         cl::Kernel bw_conv_filter_;
++        cl::Kernel reduce_;
+         bool reduce_k_;
++        bool use_split_planes_;
++        int k_split_;
+     };
+ 
+     struct DepthwiseSeparableBase {
+@@ -701,12 +958,36 @@ namespace core {
+             && config.pad[0] == 1;
+     }
+ 
++
++    // --- BC-250 investigation: runtime conv algorithm override ---------------
++    // The "auto" heuristics below are static: any 3x3/pad-1/stride-1 conv with
++    // >=8 channels gets Winograd, with no cost model and no per-device tuning.
++    // These env vars let the choice be measured instead of assumed.
++    //   DLPRIM_CONV_ALGO             - applies to all three directions
++    //   DLPRIM_CONV_FWD_ALGO         - forward only
++    //   DLPRIM_CONV_BWD_DATA_ALGO    - backward-data only
++    //   DLPRIM_CONV_BWD_FILTER_ALGO  - backward-filter only
++    // Values: auto | winograd | gemm | depthwise_separable
++    // An explicit algo passed by the caller always wins over the env var.
++    static std::string conv_algo_env(std::string const &algo,char const *var)
++    {
++        if(!(algo == "auto" || algo.empty()))
++            return algo;
++        char const *e = getenv(var);
++        if(!e)
++            e = getenv("DLPRIM_CONV_ALGO");
++        if(e && *e)
++            return e;
++        return algo;
++    }
++
+     std::unique_ptr<Conv2DForward> Conv2DForward::create(Context &ctx,
+                                                          Conv2DSettings const &config,
+                                                          bool bias,
+                                                          StandardActivations activation,
+-                                                         std::string const &algo)
++                                                         std::string const &algo_in)
+     {
++        std::string algo = conv_algo_env(algo_in,"DLPRIM_CONV_FWD_ALGO");
+         bool win = is_winograd_compatible(ctx,config);
+         bool dsc = is_depthwise_separable_compatible(config);
+ 
+@@ -727,8 +1008,9 @@ namespace core {
+         }
+         return r;
+     }
+-    std::unique_ptr<Conv2DBackwardData> Conv2DBackwardData::create(Context &ctx,Conv2DSettings const &config,std::string const &algo)
++    std::unique_ptr<Conv2DBackwardData> Conv2DBackwardData::create(Context &ctx,Conv2DSettings const &config,std::string const &algo_in)
+     {
++        std::string algo = conv_algo_env(algo_in,"DLPRIM_CONV_BWD_DATA_ALGO");
+         bool win = is_winograd_compatible(ctx,config);
+         bool dsc = is_depthwise_separable_compatible(config);
+ 
+@@ -749,8 +1031,9 @@ namespace core {
+         }
+         return r;
+     }
+-    std::unique_ptr<Conv2DBackwardFilter> Conv2DBackwardFilter::create(Context &ctx,Conv2DSettings const &config,std::string const &algo)
++    std::unique_ptr<Conv2DBackwardFilter> Conv2DBackwardFilter::create(Context &ctx,Conv2DSettings const &config,std::string const &algo_in)
+     {
++        std::string algo = conv_algo_env(algo_in,"DLPRIM_CONV_BWD_FILTER_ALGO");
+         bool win = is_winograd_compatible(ctx,config); // no need to test min channels in/out since it is more optimal in any case
+         bool dsc = is_depthwise_separable_compatible(config);
+ 
+diff --git a/src/kernels/activation.cl b/src/kernels/activation.cl
+index 2327e24..968b137 100644
+--- a/src/kernels/activation.cl
++++ b/src/kernels/activation.cl
+@@ -20,7 +20,7 @@ void activation(ulong size,__global dtype *a,ulong a_offset, __global dtype *c,u
+ 
+ 
+ __kernel
+-void activation_diff(ulong size,__global dtype *y,ulong y_offset, __global dtype *dy,ulong dy_offset,__global dtype *dx,ulong dx_offset,dtype beta)
++void activation_diff(ulong size,__global dtype *y,ulong y_offset, __global dtype *dy,ulong dy_offset,__global dtype *dx,ulong dx_offset,float beta_f)
+ {
+     ulong pos = get_global_id(0);
+     if(pos >= size)
+@@ -30,6 +30,7 @@ void activation_diff(ulong size,__global dtype *y,ulong y_offset, __global dtype
+     dx+=dx_offset;
+     dtype y_val  = y[pos];
+     dtype dy_val = dy[pos];
++    dtype beta = (dtype)beta_f;   // scalar kernel args are float for every dtype
+     dtype diff = ACTIVATION_FINV(y_val,dy_val);
+     if(beta == 0)
+         dx[pos] = diff;
+diff --git a/src/kernels/bn_sums.cl b/src/kernels/bn_sums.cl
+index c1477ec..a789c0b 100644
+--- a/src/kernels/bn_sums.cl
++++ b/src/kernels/bn_sums.cl
+@@ -62,35 +62,29 @@ void compute(
+ 
+     int items = batch * HW;
+     const int wg_size2 = WG_SIZE * SECOND_REDUCE_SIZE;
+-    int items_per_wg = (items + wg_size2 - 1) / wg_size2;
+-    int my_start = items_per_wg * get_global_id(0); // it is same as local id for 1stage reduce
+-    int my_end   = min(my_start + items_per_wg,items);
+ 
++    // Grid-stride loop: at every step the lanes of a wave read consecutive
++    // elements of one row. The previous form gave each work-item its own
++    // contiguous chunk, so neighbouring lanes read addresses items/wg_size2
++    // apart and, for a 512-channel 8x8 layer, every second lane jumped by
++    // channels*HW floats - the same cache sets every time. That launch took
++    // 1.27 ms for 16 MB (13 GB/s) on the BC-250; this form is ~15x faster.
+     float sum1 = 0;
+     float sum2 = 0;
+-    int b  = my_start / HW;
+-    int rc = my_start % HW;
+-
+-    #pragma unroll(16)
+-    for(int index = my_start;index <my_end;index ++) {
+-        if(b < batch && rc < HW) {
+-            int pos = b*(channels * HW) + rc;
+-            #if BACKWARD == 1
+-                float xv  =   x[pos];
+-                float dyv =  dy[pos];
+-                sum1 += xv*dyv;
+-                sum2 += dyv;
+-            #else
+-                float val =   x[pos];
+-                sum1 += val;
+-                sum2 += val*val;
+-            #endif
+-        }
+-        rc++;
+-        if(rc == HW) {
+-            rc = 0;
+-            b ++;
+-        }
++    for(int index = get_global_id(0);index < items;index += wg_size2) {
++        int b  = index / HW;
++        int rc = index - b * HW;
++        int pos = b*(channels * HW) + rc;
++        #if BACKWARD == 1
++            float xv  =   x[pos];
++            float dyv =  dy[pos];
++            sum1 += xv*dyv;
++            sum2 += dyv;
++        #else
++            float val =   x[pos];
++            sum1 += val;
++            sum2 += val*val;
++        #endif
+     }
+ 
+     REDUCE_PREPARE_X2(WG_SIZE,float);
+diff --git a/src/kernels/winograd_bwd_data.cl b/src/kernels/winograd_bwd_data.cl
+index b7746ba..d45058a 100644
+--- a/src/kernels/winograd_bwd_data.cl
++++ b/src/kernels/winograd_bwd_data.cl
+@@ -128,7 +128,9 @@ float16 tile2x2_to_4x4(float4 v)
+ }
+ 
+ 
+-float16 load_2x2_tile_and_transform(__global const float * restrict frame,int pos,int limit,int end,int stride,int2 mask[2])
++// Raw (masked) 2x2 tile load; transformed later so the loads for the next K
++// step can be in flight during this step's GEMM.
++float4 load_2x2_tile_raw(__global const float * restrict frame,int pos,int limit,int end,int stride,int2 mask[2])
+ {
+     float2 a[2];
+     frame += pos;
+@@ -152,7 +154,7 @@ float16 load_2x2_tile_and_transform(__global const float * restrict frame,int po
+             }
+         }
+     }
+-    return tile2x2_to_4x4((float4)(a[0],a[1]));
++    return (float4)(a[0],a[1]);
+ }
+ 
+ 
+@@ -194,6 +196,28 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+         l_val[15*strd] = v.sf;
+ }
+ 
++#ifndef HALF_GEMM
++#define HALF_GEMM 0
++#endif
++#if HALF_GEMM
++#pragma OPENCL EXTENSION cl_khr_fp16 : enable
++// Opt-in fp16 inner loop: LDS tiles and the register-tile GEMM in fp16 (packed
++// v_pk_fma_f16, fp16 accumulation). Global storage stays fp32.
++#define LTYPE half
++inline void store_local_h(__local half *l_val,int strd,float16 v)
++{
++        half16 h = convert_half16(v);
++        l_val[ 0*strd] = h.s0; l_val[ 1*strd] = h.s1; l_val[ 2*strd] = h.s2; l_val[ 3*strd] = h.s3;
++        l_val[ 4*strd] = h.s4; l_val[ 5*strd] = h.s5; l_val[ 6*strd] = h.s6; l_val[ 7*strd] = h.s7;
++        l_val[ 8*strd] = h.s8; l_val[ 9*strd] = h.s9; l_val[10*strd] = h.sa; l_val[11*strd] = h.sb;
++        l_val[12*strd] = h.sc; l_val[13*strd] = h.sd; l_val[14*strd] = h.se; l_val[15*strd] = h.sf;
++}
++#define STORE_LOCAL store_local_h
++#else
++#define LTYPE float
++#define STORE_LOCAL store_local
++#endif
++
+ #define WG_SIZE 256
+ #define TILES_IN_WG 32
+ #define KERNELS_IN_WG 32
+@@ -219,6 +243,10 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+ #define TR_STRIDE_OFFSET 1
+ #endif
+ 
++#ifndef USE_PLANES
++#define USE_PLANES 0
++#endif
++
+ #if STRIDE_OFFSET > 0 || TR_STRIDE_OFFSET > 0
+ #define PADDING_FACTOR 1
+ #else
+@@ -242,7 +270,7 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+     int half_H = (H+1)/2;
+     int half_WG = half_W * half_H;
+ 
+-    __local float wg_local_memory[(TILES_IN_WG + KERNELS_IN_WG + 16 * PADDING_FACTOR) * WG_K * 16];
++    __local LTYPE wg_local_memory[(TILES_IN_WG + KERNELS_IN_WG + 16 * PADDING_FACTOR) * WG_K * 16];
+ 
+ #define l_tile_stride (TILES_IN_WG * WG_K + STRIDE_OFFSET)
+ #define l_kern_stride (KERNELS_IN_WG * WG_K + STRIDE_OFFSET)
+@@ -290,8 +318,8 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+ 
+     #define s_img_tile(k,t,indx) wg_local_memory[(k)*(TILES_IN_WG/2*16 + TR_STRIDE_OFFSET) + (t/2) * 16 + (indx)]
+     
+-    __local float *l_tile_ptr = &l_tiles(0,l_tile_k,l_tile_rc);
+-    __local float *l_kern_ptr = &l_kernels(0,l_kern_k,l_kern_n);
++    __local LTYPE *l_tile_ptr = &l_tiles(0,l_tile_k,l_tile_rc);
++    __local LTYPE *l_kern_ptr = &l_kernels(0,l_kern_k,l_kern_n);
+ 
+     // GEMM
+ 
+@@ -300,24 +328,70 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+     int my_gemm_tile_kr = my_gemm_tile_tk / (TILES_IN_WG / PATCH_T) * PATCH_K;
+     int my_gemm_tile_tl = my_gemm_tile_tk % (TILES_IN_WG / PATCH_T) * PATCH_T;
+ 
++#if HALF_GEMM
++    half2 p_Ch[PATCH_K][PATCH_T/2]={{(half2)(0.0h)}};
++    #define PC(dr,dc) ((float)(((dc)&1) ? p_Ch[dr][(dc)/2].s1 : p_Ch[dr][(dc)/2].s0))
++#else
+     float p_C[PATCH_K][PATCH_T]={{0}};
++    #define PC(dr,dc) p_C[dr][dc]
++#endif
+ 
+     // store
+ 
++    // Software pipelining: global loads for step k+1 are issued before step
++    // k's GEMM and consumed after it (see winograd_fwd.cl).
++    float4 raw_tile = 0;
++    float16 raw_kern = 0;
++    bool tile_ok = l_b < B && l_tile_k < N;
++    bool kern_ok = l_channel < C && l_kern_k < N;
++    if(tile_ok)
++        raw_tile = load_2x2_tile_raw(result,result_pos,result_limit,result_end,W,load_mask);
++    if(kern_ok)
++        raw_kern = kernels[l_kern_k * C + l_channel];
++
+     for(int k=0;k < N;k+=WG_K,result_pos += WG_K*W*H)
+     {
+-
+-        // load relevant tile       
+-        float16 my_tile = (l_b < B && k + l_tile_k < N) ? load_2x2_tile_and_transform(result,result_pos,result_limit,result_end,W,load_mask) : 0; 
+-        store_local(l_tile_ptr,l_tile_stride,my_tile);
+-        
+-        // load relevant kernel
+-        float16 my_kern = (l_channel < C && k+l_kern_k < N) ? kernels[(l_kern_k + k) * C + l_channel] : 0;
+-        store_local(l_kern_ptr,l_kern_stride,my_kern);
++        float16 my_tile = tile_ok ? tile2x2_to_4x4(raw_tile) : 0;
++        STORE_LOCAL(l_tile_ptr,l_tile_stride,my_tile);
++        STORE_LOCAL(l_kern_ptr,l_kern_stride,kern_ok ? raw_kern : (float16)0);
+ 
+         barrier(CLK_LOCAL_MEM_FENCE);
+ 
++        {
++            int kn = k + WG_K;
++            tile_ok = l_b < B && kn + l_tile_k < N;
++            kern_ok = l_channel < C && kn + l_kern_k < N;
++            if(tile_ok)
++                raw_tile = load_2x2_tile_raw(result,result_pos + WG_K*W*H,result_limit,result_end,W,load_mask);
++            if(kern_ok)
++                raw_kern = kernels[(kn + l_kern_k) * C + l_channel];
++        }
++
+         // GEMM
++#if HALF_GEMM
++        #pragma unroll
++        for(int dk=0;dk<WG_K;dk++) {
++            half p_kern[PATCH_K];
++            #pragma unroll
++            for(int dr=0;dr<PATCH_K;dr++) {
++                p_kern[dr] = l_kernels(my_gemm_tile_b,dk,dr + my_gemm_tile_kr);
++            }
++            half2 p_tile[PATCH_T/2];
++            #pragma unroll
++            for(int dc=0;dc<PATCH_T;dc+=2) {
++                p_tile[dc/2] = (half2)(l_tiles(my_gemm_tile_b,dk,dc + my_gemm_tile_tl),
++                                       l_tiles(my_gemm_tile_b,dk,dc + 1 + my_gemm_tile_tl));
++            }
++            #pragma unroll
++            for(int dr=0;dr<PATCH_K;dr++) {
++                half2 kk = (half2)(p_kern[dr]);
++                #pragma unroll
++                for(int j=0;j<PATCH_T/2;j++) {
++                    p_Ch[dr][j] = mad(kk,p_tile[j],p_Ch[dr][j]);
++                }
++            }
++        }
++#else
+         #pragma unroll
+         for(int dk=0;dk<WG_K;dk++) {
+             float p_kern[PATCH_K];
+@@ -339,6 +413,7 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+                 }
+             }
+         }
++#endif
+         barrier(CLK_LOCAL_MEM_FENCE);
+     }
+ 
+@@ -356,7 +431,7 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+             #pragma unroll
+             for(int dc=0;dc<PATCH_T;dc+=2) {
+                 int tile_c = dc + dc_split + my_gemm_tile_tl;
+-                s_img_tile(tile_r,tile_c,my_gemm_tile_b) = p_C[dr][dc + dc_split];
++                s_img_tile(tile_r,tile_c,my_gemm_tile_b) = PC(dr,dc + dc_split);
+              }
+         }
+         
+@@ -367,7 +442,11 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+             
+             int s_col_t = s_col_t0 + dc + dc_split;
+ 
++#if HALF_GEMM
++            float16 s_tile = convert_float16(vload16(0,&s_img_tile(s_row_t,s_col_t,0)));
++#else
+             float16 s_tile = vload16(0,&s_img_tile(s_row_t,s_col_t,0));
++#endif
+             float s_img_tile[4][4];
+             transform_tile_bwd(s_tile,s_img_tile);
+ 
+@@ -381,7 +460,23 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+             int s_channel = wg_channel + s_row_t;
+ 
+             if(s_b < B && s_channel < C ) {
++#if USE_PLANES
++                // Winograd F(2x2,3x3) input-gradient tiles are 4x4 at stride 2,
++                // so four tiles touch every output pixel - which is why this
++                // accumulated through atomic_addf, a compare-and-swap retry loop
++                // on a device with no hardware fp32 atomic add. Tiles of equal
++                // row- and column-parity are 4 apart in each direction, so
++                // within one of the four parity classes the patches are exactly
++                // disjoint: each class gets its own plane, written with plain
++                // stores, and winconv_3x3_bwd_data_reduce sums the planes.
++                int s_tr = s_rc / half_W;
++                int s_tc = s_rc % half_W;
++                ulong s_plane = (ulong)(((s_tr & 1) << 1) | (s_tc & 1));
++                __global float *ptr = image + s_plane * ((ulong)B * C * H * W)
++                                    + ((s_b * C + s_channel) * H + s_row) * W + s_col;
++#else
+                 __global float *ptr = image + ((s_b * C + s_channel) * H + s_row) * W + s_col;
++#endif
+                 #pragma unroll
+                 for(int dr=0;dr<4;dr++,ptr+=W) {
+                     int r = s_row + dr;
+@@ -390,7 +485,11 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+                         for(int dc=0;dc<4;dc++) {
+                             int c = s_col + dc;
+                             if(c >= 0 && c < W) {
++#if USE_PLANES
++                                ptr[dc] = s_img_tile[dr][dc];
++#else
+                                 atomic_addf(ptr + dc,s_img_tile[dr][dc]);
++#endif
+                             }
+                         }
+                     }
+@@ -404,3 +503,48 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+ }
+ 
+ 
++
++
++// Sum the four parity planes written above into the real input gradient.
++// dst = beta*dst + sum_{p=0..3} src[p]
++// A pixel is covered by two tiles along each axis (rows 2t-1..2t+2 overlap
++// by two), and those two tiles have opposite parity - except on the first
++// row/column, which only tile 0 (even) reaches, and on the last one when the
++// size is even, which only the last tile (odd) reaches. Elements of a plane
++// that no tile of its parity class writes are never initialised, so mask them
++// here instead of zero-filling 4 planes before every launch.
++inline int parity_mask(int r,int n)
++{
++    int half_n = (n + 1) / 2;
++    int t1 = (r + 1) / 2;          // tile whose rows 2*t1-1 .. 2*t1+2 hold r
++    int t0 = t1 - 1;
++    int m = 0;
++    if(t1 < half_n) m |= 1 << (t1 & 1);
++    if(t0 >= 0)     m |= 1 << (t0 & 1);
++    return m;
++}
++
++__kernel void winconv_3x3_bwd_data_reduce(
++                          int total,int H,int W,
++                          __global float *dst,ulong dst_offset,
++                          __global float const * restrict src,ulong src_offset,
++                          float beta)
++{
++    int i = get_global_id(0);
++    if(i >= total)
++        return;
++    dst += dst_offset;
++    src += src_offset;
++    int c = i % W;
++    int r = (i / W) % H;
++    int rm = parity_mask(r,H);
++    int cm = parity_mask(c,W);
++    ulong t = (ulong)total;
++    // plane index = (row parity << 1) | col parity
++    float s = 0;
++    if((rm & 1) && (cm & 1)) s += src[i];
++    if((rm & 1) && (cm & 2)) s += src[t + i];
++    if((rm & 2) && (cm & 1)) s += src[2*t + i];
++    if((rm & 2) && (cm & 2)) s += src[3*t + i];
++    dst[i] = (beta == 0) ? s : (dst[i] * beta + s);
++}
+diff --git a/src/kernels/winograd_bwd_filter.cl b/src/kernels/winograd_bwd_filter.cl
+index 095039b..3c45c4f 100644
+--- a/src/kernels/winograd_bwd_filter.cl
++++ b/src/kernels/winograd_bwd_filter.cl
+@@ -100,52 +100,55 @@ float16 transform_tile(float4 a[4])
+ }
+ 
+ 
+-float16 load_4x4_tile_and_transform(__global const float * restrict img,int r,int c)
++// img points at (r,c) of the plane, which may be outside the image (the
++// tile has a one-element halo). base/end bound the whole buffer. Rows out of
++// the image are zero; columns are loaded as one vload4 and masked, so a tile
++// on the left/right edge (every tile of a 4x4 or 8x8 layer) costs the same
++// as an interior one. The vload4 may straddle into a neighbouring row of the
++// same buffer - harmless, those lanes are masked - but not outside the buffer.
++void load_4x4_tile_raw(float4 vals[4],__global const float * restrict img,int r,int c,
++                       __global const float * restrict base,
++                       __global const float * restrict end)
+ {
+-    float4 vals[4];
++    int4 colmask;
++    colmask.s0 = (c+0 >= 0 && c+0 < IMG_W) ? -1 : 0;
++    colmask.s1 = (c+1 >= 0 && c+1 < IMG_W) ? -1 : 0;
++    colmask.s2 = (c+2 >= 0 && c+2 < IMG_W) ? -1 : 0;
++    colmask.s3 = (c+3 >= 0 && c+3 < IMG_W) ? -1 : 0;
+     #pragma unroll
+     for(int dr=0;dr<4;dr++,img+=IMG_W) {
+-        if(r+dr >= 0 && r+dr < IMG_H) { 
+-            if(c>= 0 && c + 3 < IMG_W)
+-                vals[dr] = vload4(0,img);
++        if(r+dr >= 0 && r+dr < IMG_H) {
++            float4 v;
++            if(img >= base && img + 4 <= end)
++                v = vload4(0,img);
+             else {
+-                vals[dr].s0 = (c+0 >= 0 && c+0 < IMG_W) ? img[0] : 0;
+-                vals[dr].s1 = (c+1 >= 0 && c+1 < IMG_W) ? img[1] : 0;
+-                vals[dr].s2 = (c+2 >= 0 && c+2 < IMG_W) ? img[2] : 0;
+-                vals[dr].s3 = (c+3 >= 0 && c+3 < IMG_W) ? img[3] : 0;
++                v.s0 = (c+0 >= 0 && c+0 < IMG_W) ? img[0] : 0;
++                v.s1 = (c+1 >= 0 && c+1 < IMG_W) ? img[1] : 0;
++                v.s2 = (c+2 >= 0 && c+2 < IMG_W) ? img[2] : 0;
++                v.s3 = (c+3 >= 0 && c+3 < IMG_W) ? img[3] : 0;
+             }
++            vals[dr] = as_float4(as_int4(v) & colmask);
+         }
+         else {
+             vals[dr] = 0;
+         }
+     }
+-
+-    
+-
+-    return transform_tile(vals);
+ }
+ 
+ 
+-float16 load_2x2_tile_and_transform(__global const float * restrict img,int r,int c)
++float4 load_2x2_tile_raw(__global const float * restrict img,int r,int c)
+ {
+-    float4 v;
+-    if(r < IMG_H) {
+-        v.s0 = c+0 < IMG_W ? img[0] : 0.0;
+-        v.s1 = c+1 < IMG_W ? img[1] : 0.0;
+-    }
+-    else {
+-        v.lo = 0;
+-    }
++    // c is even and >= 0; the pair is one vload2 unless it crosses the right
++    // edge (odd IMG_W only).
++    float4 v = 0;
++    bool pair = c + 1 < IMG_W;
++    if(r < IMG_H)
++        v.lo = pair ? vload2(0,img) : (float2)(c < IMG_W ? img[0] : 0.0f, 0.0f);
+     if(r + 1 < IMG_H) {
+         img += IMG_W;
+-        v.s2 = c+0 < IMG_W ? img[0] : 0.0;
+-        v.s3 = c+1 < IMG_W ? img[1] : 0.0;
+-    }
+-    else {
+-        v.hi = 0;
++        v.hi = pair ? vload2(0,img) : (float2)(c < IMG_W ? img[0] : 0.0f, 0.0f);
+     }
+-
+-    return tile2x2_to_4x4(v);
++    return v;
+ }
+ 
+ 
+@@ -199,6 +202,29 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+         l_val[15*strd] = v.sf;
+ }
+ 
++#ifndef HALF_GEMM
++#define HALF_GEMM 0
++#endif
++#if HALF_GEMM
++#pragma OPENCL EXTENSION cl_khr_fp16 : enable
++// Opt-in fp16 inner loop: LDS tiles and the register-tile GEMM in fp16 (packed
++// v_pk_fma_f16). Accumulation is fp16 too, over this work-group's K slice only;
++// the slices are summed in fp32 by the reduce kernel.
++#define LTYPE half
++inline void store_local_h(__local half *l_val,int strd,float16 v)
++{
++        half16 h = convert_half16(v);
++        l_val[ 0*strd] = h.s0; l_val[ 1*strd] = h.s1; l_val[ 2*strd] = h.s2; l_val[ 3*strd] = h.s3;
++        l_val[ 4*strd] = h.s4; l_val[ 5*strd] = h.s5; l_val[ 6*strd] = h.s6; l_val[ 7*strd] = h.s7;
++        l_val[ 8*strd] = h.s8; l_val[ 9*strd] = h.s9; l_val[10*strd] = h.sa; l_val[11*strd] = h.sb;
++        l_val[12*strd] = h.sc; l_val[13*strd] = h.sd; l_val[14*strd] = h.se; l_val[15*strd] = h.sf;
++}
++#define STORE_LOCAL store_local_h
++#else
++#define LTYPE float
++#define STORE_LOCAL store_local
++#endif
++
+ #define WG_SIZE 256
+ #define XTILES_IN_WG 32
+ #define YTILES_IN_WG 32
+@@ -224,6 +250,10 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+ #define TR_STRIDE_OFFSET 1
+ #endif
+ 
++#ifndef USE_SPLIT_PLANES
++#define USE_SPLIT_PLANES 0
++#endif
++
+ #if STRIDE_OFFSET > 0 || TR_STRIDE_OFFSET > 0
+ #define PADDING_FACTOR 1
+ #else
+@@ -248,7 +278,7 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+     #define half_H  ((IMG_H+1)/2)
+     #define half_WG (half_W * half_H)
+ 
+-    __local float wg_local_memory[(XTILES_IN_WG + YTILES_IN_WG + 16 * PADDING_FACTOR) * WG_K * 16];
++    __local LTYPE wg_local_memory[(XTILES_IN_WG + YTILES_IN_WG + 16 * PADDING_FACTOR) * WG_K * 16];
+ 
+ #define l_xtile_stride (XTILES_IN_WG * WG_K + STRIDE_OFFSET)
+ #define l_ytile_stride (YTILES_IN_WG * WG_K + STRIDE_OFFSET)
+@@ -258,19 +288,24 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+ 
+ 
+     // Loading data
+-    int l_xtile_c = get_local_id(WG_DIM) % XTILES_IN_WG;
+-    int l_xtile_k = get_local_id(WG_DIM) / XTILES_IN_WG;
+-
+-    int l_ytile_n = get_local_id(WG_DIM) % YTILES_IN_WG;
+-    int l_ytile_k = get_local_id(WG_DIM) / YTILES_IN_WG;
++    // Lane -> (channel, k) mapping for the loads. k (batch x tile) varies
++    // fastest across lanes so that neighbouring lanes read neighbouring tiles
++    // of the SAME channel plane, which are adjacent in memory. With channel
++    // varying fastest every lane reads from a different plane, a stride of
++    // IMG_H*IMG_W floats, and nothing coalesces.
++    int l_xtile_k = get_local_id(WG_DIM) % WG_K;
++    int l_xtile_c = get_local_id(WG_DIM) / WG_K;
++
++    int l_ytile_k = get_local_id(WG_DIM) % WG_K;
++    int l_ytile_n = get_local_id(WG_DIM) / WG_K;
+    
+     int wg_ch_in  = get_group_id(0) * XTILES_IN_WG;
+     int wg_ch_out = get_global_id(1) * YTILES_IN_WG; 
+ 
+     #define s_img_tile(k,t,indx) wg_local_memory[(k)*(XTILES_IN_WG/2*16 + TR_STRIDE_OFFSET) + (t/2) * 16 + (indx)]
+     
+-    __local float *l_xtile_ptr = &l_xtiles(0,l_xtile_k,l_xtile_c);
+-    __local float *l_ytile_ptr = &l_ytiles(0,l_ytile_k,l_ytile_n);
++    __local LTYPE *l_xtile_ptr = &l_xtiles(0,l_xtile_k,l_xtile_c);
++    __local LTYPE *l_ytile_ptr = &l_ytiles(0,l_ytile_k,l_ytile_n);
+ 
+     // GEMM
+ 
+@@ -279,7 +314,13 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+     int my_gemm_tile_kr = my_gemm_tile_tk / (XTILES_IN_WG / PATCH_X) * PATCH_Y;
+     int my_gemm_tile_tl = my_gemm_tile_tk % (XTILES_IN_WG / PATCH_X) * PATCH_X;
+ 
++#if HALF_GEMM
++    half2 p_Ch[PATCH_Y][PATCH_X/2]={{(half2)(0.0h)}};
++    #define PC(dr,dc) ((float)(((dc)&1) ? p_Ch[dr][(dc)/2].s1 : p_Ch[dr][(dc)/2].s0))
++#else
+     float p_C[PATCH_Y][PATCH_X]={{0}};
++    #define PC(dr,dc) p_C[dr][dc]
++#endif
+ 
+     int k=0;
+     int K_limit = B * half_WG;
+@@ -291,37 +332,76 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+         reduce_k = true;
+     }
+     
++    __global float const *image_base = image;
++    __global float const *image_end  = image + (size_t)B * C * IMG_H * IMG_W;
+     image  += (wg_ch_in  + l_xtile_c) * (IMG_H * IMG_W);
+     result += (wg_ch_out + l_ytile_n) * (IMG_H * IMG_W);
+ 
++    // Software pipelining: the global loads for step k+WG_K are issued before
++    // this step's GEMM and consumed after it (see winograd_fwd.cl).
++    float4 raw_x[4] = {0,0,0,0};
++    float4 raw_y = 0;
++    bool x_ok = false, y_ok = false;
++    #define PREFETCH(kk) \
++        { \
++            int my_k = (kk) + l_xtile_k; \
++            x_ok = my_k < K_limit && l_xtile_c + wg_ch_in < C; \
++            if(x_ok) { \
++                int batch  = my_k / half_WG; \
++                int rowcol = my_k % half_WG; \
++                int row    = rowcol / half_W * 2; \
++                int col    = rowcol % half_W * 2; \
++                __global float const *x = image + batch * C * IMG_H * IMG_W + (row - 1) * IMG_W + (col - 1); \
++                load_4x4_tile_raw(raw_x,x,row-1,col-1,image_base,image_end); \
++            } \
++            my_k = (kk) + l_ytile_k; \
++            y_ok = my_k < K_limit && l_ytile_n + wg_ch_out < N; \
++            if(y_ok) { \
++                int batch  = my_k / half_WG; \
++                int rowcol = my_k % half_WG; \
++                int row    = rowcol / half_W * 2; \
++                int col    = rowcol % half_W * 2; \
++                __global float const *dy = result + batch * N * IMG_H * IMG_W + row * IMG_W + col; \
++                raw_y = load_2x2_tile_raw(dy,row,col); \
++            } \
++        }
++    PREFETCH(k);
+     for(;k < K_limit;k+=WG_K)
+     {
+-        {
+-            int my_k = k + l_xtile_k;
+-            int batch  = my_k / half_WG;
+-            int rowcol = my_k % half_WG;
+-            int row    = rowcol / half_W * 2;
+-            int col    = rowcol % half_W * 2;
+-            __global float const *x = image + batch * C * IMG_H * IMG_W + (row - 1) * IMG_W + (col - 1);
+-            // load relevant tile       
+-            float16 my_xtile = (k + l_xtile_k < K_limit && l_xtile_c + wg_ch_in < C) ? load_4x4_tile_and_transform(x,row-1,col-1) : 0; 
+-            store_local(l_xtile_ptr,l_xtile_stride,my_xtile);
+-        }
+-        {
+-            int my_k = k + l_ytile_k;
+-            int batch  = my_k / half_WG;
+-            int rowcol = my_k % half_WG;
+-            int row    = rowcol / half_W * 2;
+-            int col    = rowcol % half_W * 2;
+-             __global float const *dy = result + batch * N * IMG_H * IMG_W + row * IMG_W + col;
+-            // load relevant kernel
+-            float16 my_ytile = (k + l_ytile_k < K_limit && l_ytile_n + wg_ch_out < N) ? load_2x2_tile_and_transform(dy,row,col) : 0;
+-            store_local(l_ytile_ptr,l_ytile_stride,my_ytile);
+-        }
++        float16 my_xtile = x_ok ? transform_tile(raw_x) : 0;
++        STORE_LOCAL(l_xtile_ptr,l_xtile_stride,my_xtile);
++        float16 my_ytile = y_ok ? tile2x2_to_4x4(raw_y) : 0;
++        STORE_LOCAL(l_ytile_ptr,l_ytile_stride,my_ytile);
+ 
+         barrier(CLK_LOCAL_MEM_FENCE);
+ 
++        PREFETCH(k + WG_K);
++
+         // GEMM
++#if HALF_GEMM
++        #pragma unroll
++        for(int dk=0;dk<WG_K;dk++) {
++            half p_y[PATCH_Y];
++            #pragma unroll
++            for(int dr=0;dr<PATCH_Y;dr++) {
++                p_y[dr] = l_ytiles(my_gemm_tile_b,dk,dr + my_gemm_tile_kr);
++            }
++            half2 p_x[PATCH_X/2];
++            #pragma unroll
++            for(int dc=0;dc<PATCH_X;dc+=2) {
++                p_x[dc/2] = (half2)(l_xtiles(my_gemm_tile_b,dk,dc + my_gemm_tile_tl),
++                                    l_xtiles(my_gemm_tile_b,dk,dc + 1 + my_gemm_tile_tl));
++            }
++            #pragma unroll
++            for(int dr=0;dr<PATCH_Y;dr++) {
++                half2 yy = (half2)(p_y[dr]);
++                #pragma unroll
++                for(int j=0;j<PATCH_X/2;j++) {
++                    p_Ch[dr][j] = mad(yy,p_x[j],p_Ch[dr][j]);
++                }
++            }
++        }
++#else
+         #pragma unroll
+         for(int dk=0;dk<WG_K;dk++) {
+             float p_y[PATCH_Y];
+@@ -343,6 +423,7 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+                 }
+             }
+         }
++#endif
+         barrier(CLK_LOCAL_MEM_FENCE);
+     }
+ 
+@@ -360,7 +441,7 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+             #pragma unroll
+             for(int dc=0;dc<PATCH_X;dc+=2) {
+                 int tile_c = dc + dc_split + my_gemm_tile_tl;
+-                s_img_tile(tile_r,tile_c,my_gemm_tile_b) = p_C[dr][dc + dc_split];
++                s_img_tile(tile_r,tile_c,my_gemm_tile_b) = PC(dr,dc + dc_split);
+              }
+         }
+         
+@@ -377,15 +458,33 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+             if(kern_ch_out >= N || kern_ch_in >= C)
+                 continue;
+ 
++#if HALF_GEMM
++            float16 s_kern16 = convert_float16(vload16(0,&s_img_tile(s_row_t,s_col_t,0)));
++#else
+             float16 s_kern16 = vload16(0,&s_img_tile(s_row_t,s_col_t,0));
++#endif
+             float s_kern9[9];
+             transform_kernel_bwd(s_kern16,s_kern9);
+             __global float *ptr = kernels + 9* (kern_ch_in +  kern_ch_out * C);
+             if(reduce_k) {
++#if USE_SPLIT_PLANES
++                // Split-K writes its slice to a private plane of the workspace
++                // and a separate pass reduces them, instead of an emulated
++                // atomic add. Off by default: see ../../../OPENCL-PERF.md, this
++                // is measurably faster but shows a rare wrong dW when the same
++                // workspace is also used by backward-data, and the cause is not
++                // yet understood.
++                ptr += (ulong)get_global_id(2) * 9 * (ulong)N * (ulong)C;
++                #pragma unroll
++                for(int i=0;i<9;i++) {
++                    ptr[i] = s_kern9[i];
++                }
++#else
+                 #pragma unroll
+                 for(int i=0;i<9;i++) {
+                     atomic_addf(ptr + i, s_kern9[i]);
+                 }
++#endif
+             }
+             else {
+                 #pragma unroll
+@@ -404,3 +503,23 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+ }
+ 
+ 
++
++
++// Sum the split-K planes written above into the real filter gradient.
++// dst = beta*dst + sum_k src[k]
++__kernel void winconv_3x3_bwd_filter_reduce(
++                          int total,int splits,
++                          __global float *dst,ulong dst_offset,
++                          __global float const *restrict src,ulong src_offset,
++                          float beta)
++{
++    int i = get_global_id(0);
++    if(i >= total)
++        return;
++    dst += dst_offset;
++    src += src_offset;
++    float s = 0;
++    for(int k=0;k<splits;k++)
++        s += src[(ulong)k * (ulong)total + i];
++    dst[i] = (beta == 0) ? s : (dst[i] * beta + s);
++}
+diff --git a/src/kernels/winograd_fwd.cl b/src/kernels/winograd_fwd.cl
+index df8e2de..e7fd565 100644
+--- a/src/kernels/winograd_fwd.cl
++++ b/src/kernels/winograd_fwd.cl
+@@ -69,9 +69,10 @@ float16 transform_tile(float4 a[4])
+ }
+ 
+ 
+-float16 load_4x4_tile_and_transform_v2(__global const float * restrict frame,int pos,int limit,int end,int stride,int4 mask[4])
++// Raw (masked) 4x4 tile load; the Winograd input transform is applied later so
++// that the loads for the next K step can be in flight during this step's GEMM.
++void load_4x4_tile_raw(float4 a[4],__global const float * restrict frame,int pos,int limit,int end,int stride,int4 mask[4])
+ {
+-    float4 a[4];
+     frame += pos;
+     
+     if(pos >= 0 && pos < limit) {
+@@ -95,7 +96,6 @@ float16 load_4x4_tile_and_transform_v2(__global const float * restrict frame,int
+             }
+         }
+     }
+-    return transform_tile(a);
+ }
+ 
+ 
+@@ -171,7 +171,12 @@ __kernel void winconv_calc_gkgt_3x3(int N,int C,
+     if(n >= N || c>= C)
+         return;
+     float16 kern = load_3x3_kernel_and_transform(gk3 + (C * n + c) * 9);
+-    k4[C * n + c] = kern;
++    // Stored [c][n], not [n][c]: winconv_3x3 below reads one input channel for
++    // 32 consecutive output features per wave, so this layout makes that read
++    // contiguous. With [n][c] the 32 lanes read at a stride of C*64 bytes, and
++    // on the BC-250 that alone cost 39% of the forward kernel's time (measured
++    // by reading the wrong-but-coalesced address, see ../../../OPENCL-PERF.md).
++    k4[N * c + n] = kern;
+ }
+ 
+ 
+@@ -196,6 +201,30 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+         l_val[15*strd] = v.sf;
+ }
+ 
++#ifndef HALF_GEMM
++#define HALF_GEMM 0
++#endif
++#if HALF_GEMM
++#pragma OPENCL EXTENSION cl_khr_fp16 : enable
++// Opt-in fp16 inner loop (DLPRIM_CONV_FP16=1): LDS tiles and the register-tile
++// GEMM in fp16 (packed v_pk_fma_f16, fp16 accumulation). Global storage stays
++// fp32. A variant with fp32 accumulation via v_fma_mix_f32 was measured too:
++// TF32-class accuracy but slower than plain fp32 on this chip, so it is not here.
++#define LTYPE half
++inline void store_local_h(__local half *l_val,int strd,float16 v)
++{
++        half16 h = convert_half16(v);
++        l_val[ 0*strd] = h.s0; l_val[ 1*strd] = h.s1; l_val[ 2*strd] = h.s2; l_val[ 3*strd] = h.s3;
++        l_val[ 4*strd] = h.s4; l_val[ 5*strd] = h.s5; l_val[ 6*strd] = h.s6; l_val[ 7*strd] = h.s7;
++        l_val[ 8*strd] = h.s8; l_val[ 9*strd] = h.s9; l_val[10*strd] = h.sa; l_val[11*strd] = h.sb;
++        l_val[12*strd] = h.sc; l_val[13*strd] = h.sd; l_val[14*strd] = h.se; l_val[15*strd] = h.sf;
++}
++#define STORE_LOCAL store_local_h
++#else
++#define LTYPE float
++#define STORE_LOCAL store_local
++#endif
++
+ #define WG_SIZE 256
+ #define TILES_IN_WG 32
+ #define KERNELS_IN_WG 32
+@@ -260,7 +289,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+     int half_H = (H+1)/2;
+     int half_WG = half_W * half_H;
+ 
+-    __local float wg_local_memory[(TILES_IN_WG + KERNELS_IN_WG + (16*PADDING_FACTOR)) * WG_K * 16];
++    __local LTYPE wg_local_memory[(TILES_IN_WG + KERNELS_IN_WG + (16*PADDING_FACTOR)) * WG_K * 16];
+ 
+ #define l_tile_stride (TILES_IN_WG * WG_K + STRIDE_OFFSET)
+ #define l_kern_stride (KERNELS_IN_WG * WG_K + STRIDE_OFFSET)
+@@ -312,8 +341,8 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+ 
+     #define s_img_tile(k,t,indx) wg_local_memory[(k)*(TILES_IN_WG/2*16 + TR_STRIDE_OFFSET) + (t/2) * 16 + (indx)]
+     
+-    __local float *l_tile_ptr = &l_tiles(0,l_tile_k,l_tile_rc);
+-    __local float *l_kern_ptr = &l_kernels(0,l_kern_k,l_kern_n);
++    __local LTYPE *l_tile_ptr = &l_tiles(0,l_tile_k,l_tile_rc);
++    __local LTYPE *l_kern_ptr = &l_kernels(0,l_kern_k,l_kern_n);
+ 
+     // GEMM
+ 
+@@ -322,24 +351,73 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+     int my_gemm_tile_kr = my_gemm_tile_tk / (TILES_IN_WG / PATCH_T) * PATCH_K;
+     int my_gemm_tile_tl = my_gemm_tile_tk % (TILES_IN_WG / PATCH_T) * PATCH_T;
+ 
++#if HALF_GEMM
++    half2 p_Ch[PATCH_K][PATCH_T/2]={{(half2)(0.0h)}};
++    #define PC(dr,dc) ((float)(((dc)&1) ? p_Ch[dr][(dc)/2].s1 : p_Ch[dr][(dc)/2].s0))
++#else
+     float p_C[PATCH_K][PATCH_T]={{0}};
++    #define PC(dr,dc) p_C[dr][dc]
++#endif
+ 
+     // store
+ 
++    // Software pipelining: the global loads for step k+1 are issued before
++    // step k's GEMM and consumed (transformed, stored to LDS) after it, so
++    // memory latency overlaps arithmetic instead of serialising with it.
++    float4 raw_tile[4] = {0,0,0,0};
++    float16 raw_kern = 0;
++    bool tile_ok = l_b < B && l_tile_k < C;
++    bool kern_ok = l_feature < N && l_kern_k < C;
++    if(tile_ok)
++        load_4x4_tile_raw(raw_tile,image,image_pos,image_limit,image_end,W,load_mask);
++    if(kern_ok)
++        raw_kern = kernels[l_kern_k * N + l_feature];
++
+     for(int k=0;k < C;k+=WG_K,image_pos += WG_K*W*H)
+     {
+-
+-        // load relevant tile        
+-        float16 my_tile = (l_b < B && k + l_tile_k < C) ? load_4x4_tile_and_transform_v2(image,image_pos,image_limit,image_end,W,load_mask) : 0; 
+-        store_local(l_tile_ptr,l_tile_stride,my_tile);
+-        
+-        // load relevant kernel
+-        float16 my_kern = (l_feature < N && k+l_kern_k < C) ? kernels[l_feature * C + k + l_kern_k] : 0;
+-        store_local(l_kern_ptr,l_kern_stride,my_kern);
++        // step k: transform what was prefetched and publish it
++        float16 my_tile = tile_ok ? transform_tile(raw_tile) : 0;
++        STORE_LOCAL(l_tile_ptr,l_tile_stride,my_tile);
++        STORE_LOCAL(l_kern_ptr,l_kern_stride,kern_ok ? raw_kern : (float16)0);
+ 
+         barrier(CLK_LOCAL_MEM_FENCE);
+ 
++        // prefetch step k+1 (overlaps the GEMM below)
++        {
++            int kn = k + WG_K;
++            tile_ok = l_b < B && kn + l_tile_k < C;
++            kern_ok = l_feature < N && kn + l_kern_k < C;
++            if(tile_ok)
++                load_4x4_tile_raw(raw_tile,image,image_pos + WG_K*W*H,image_limit,image_end,W,load_mask);
++            if(kern_ok)
++                raw_kern = kernels[(kn + l_kern_k) * N + l_feature];
++        }
++
+         // GEMM
++#if HALF_GEMM
++        #pragma unroll
++        for(int dk=0;dk<WG_K;dk++) {
++            half p_kern[PATCH_K];
++            #pragma unroll
++            for(int dr=0;dr<PATCH_K;dr++) {
++                p_kern[dr] = l_kernels(my_gemm_tile_b,dk,dr + my_gemm_tile_kr);
++            }
++            half2 p_tile[PATCH_T/2];
++            #pragma unroll
++            for(int dc=0;dc<PATCH_T;dc+=2) {
++                p_tile[dc/2] = (half2)(l_tiles(my_gemm_tile_b,dk,dc + my_gemm_tile_tl),
++                                       l_tiles(my_gemm_tile_b,dk,dc + 1 + my_gemm_tile_tl));
++            }
++            #pragma unroll
++            for(int dr=0;dr<PATCH_K;dr++) {
++                half2 kk = (half2)(p_kern[dr]);
++                #pragma unroll
++                for(int j=0;j<PATCH_T/2;j++) {
++                    p_Ch[dr][j] = mad(kk,p_tile[j],p_Ch[dr][j]);
++                }
++            }
++        }
++#else
+         #pragma unroll
+         for(int dk=0;dk<WG_K;dk++) {
+             float p_kern[PATCH_K];
+@@ -361,6 +439,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+                 }
+             }
+         }
++#endif
+         barrier(CLK_LOCAL_MEM_FENCE);
+     }
+ 
+@@ -378,7 +457,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+             #pragma unroll
+             for(int dc=0;dc<PATCH_T;dc+=2) {
+                 int tile_c = dc + dc_split + my_gemm_tile_tl;
+-                s_img_tile(tile_r,tile_c,my_gemm_tile_b) = p_C[dr][dc + dc_split];
++                s_img_tile(tile_r,tile_c,my_gemm_tile_b) = PC(dr,dc + dc_split);
+              }
+         }
+         
+@@ -389,7 +468,11 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+             
+             int s_col_t = s_col_t0 + dc + dc_split;
+ 
++#if HALF_GEMM
++            float16 s_tile = convert_float16(vload16(0,&s_img_tile(s_row_t,s_col_t,0)));
++#else
+             float16 s_tile = vload16(0,&s_img_tile(s_row_t,s_col_t,0));
++#endif
+             float4 s_img_tile = tile4x4_after_wingorad_to_2x2(s_tile);
+ 
+             int s_brc = wg_brc + s_col_t;
