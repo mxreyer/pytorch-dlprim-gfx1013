@@ -7,7 +7,8 @@
 #                           plane writes + a reduce, coalesce four access
 #                           patterns, prefetch, opt-in fp16 inner loop
 #                           (909 -> 2,055 img/s; 2,987 with DLPRIM_CONV_FP16=1)
-#   gelu_mad.patch        - fma() is software-emulated on rusticl; use mad()
+#   gelu_mad.patch        - fma() is software-emulated on rusticl < Mesa 26.2;
+#                           use mad() (redundant, harmless on 26.2)
 #   pytorch_ocl_half_fixes.patch - reject non-float32 tensors in convolution
 #                           (they silently produced NaN); dtype-correct
 #                           hardtanh/relu6/clamp; contiguous grad in hardtanh_backward
@@ -63,9 +64,11 @@ fi
 echo "== applying patches =="
 # Correctness: rusticl has no work_group_reduce_* (a driver feature gap).
 git -C "$SCRATCH/src/dlprimitives" apply "$HERE/custom_reduce.patch"
-# Performance: fill all CUs in the Winograd backward-filter kernel.
+# Performance: all of the convolution work (occupancy, atomics-free planes,
+# access patterns, prefetch, opt-in fp16) plus the activation dtype fix.
 git -C "$SCRATCH/src/dlprimitives" apply "$HERE/winograd_ksplit.patch"
-# Performance: OpenCL fma() is a software emulation on rusticl; use mad().
+# Performance: OpenCL fma() is a software emulation on rusticl before Mesa
+# 26.2; use mad(). Redundant but harmless on 26.2.
 git -C "$SCRATCH/src"              apply "$HERE/gelu_mad.patch"
 # Half-tensor fixes: reject non-float32 in convolution (came back as NaN),
 # dtype-correct hardtanh/relu6/clamp formulas, contiguous grad in hardtanh_backward.

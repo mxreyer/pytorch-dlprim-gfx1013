@@ -30,7 +30,7 @@ index 3d6045d..fbf2798 100644
          
          
 diff --git a/src/core/conv.cpp b/src/core/conv.cpp
-index b090e4c..48de716 100644
+index b090e4c..d667b13 100644
 --- a/src/core/conv.cpp
 +++ b/src/core/conv.cpp
 @@ -9,6 +9,13 @@
@@ -47,7 +47,7 @@ index b090e4c..48de716 100644
  #include <dlprim/gpu/program_cache.hpp>
  #include <iostream>
  
-@@ -220,6 +227,32 @@ namespace core {
+@@ -220,6 +227,33 @@ namespace core {
      };
  
  
@@ -58,7 +58,8 @@ index b090e4c..48de716 100644
 +    // to be the GPU clock governor's idle-floor voltage (1000 MHz at 718 mV),
 +    // not the kernels and not the compiler - 66/100 sweeps bad pinned at that
 +    // point, 0/900 with the voltage back at the shipped default. See
-+    // ../../../OPENCL-PERF.md, Finding 3. DLPRIM_WINOGRAD_BWD_PLANES=0 /
++    // OPENCL-PERF.md, Finding 3, in mxreyer/pytorch-dlprim-gfx1013.
++    // DLPRIM_WINOGRAD_BWD_PLANES=0 /
 +    // DLPRIM_WINOGRAD_SPLIT_PLANES=0 select the atomic paths for comparison.
 +    static bool env_enabled(char const *name,bool def)
 +    {
@@ -80,7 +81,7 @@ index b090e4c..48de716 100644
      class Conv2DForwardWinograd : public Conv2DForward {
      public:
          virtual char const *algo() const
-@@ -278,6 +311,14 @@ namespace core {
+@@ -278,6 +312,14 @@ namespace core {
          {
              int off = ctx.is_amd() ? 0 : 1;
              int toff = 1;
@@ -95,7 +96,7 @@ index b090e4c..48de716 100644
              int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
              if(local_mem_size < 40960) {
                  off = 0;
-@@ -287,6 +328,7 @@ namespace core {
+@@ -287,6 +329,7 @@ namespace core {
                                              "ACTIVATION",int(activation),
                                              "STRIDE_OFFSET",off,
                                              "TR_STRIDE_OFFSET",toff,
@@ -103,7 +104,7 @@ index b090e4c..48de716 100644
                                              "BIAS",int(bias));
              conv_kernel_ = cl::Kernel(prog,"winconv_calc_gkgt_3x3");
              conv_ = cl::Kernel(prog,"winconv_3x3");
-@@ -302,25 +344,58 @@ namespace core {
+@@ -302,25 +345,58 @@ namespace core {
          {
              return "winograd";
          }
@@ -167,7 +168,7 @@ index b090e4c..48de716 100644
          }
          virtual void enqueue(Tensor &dx,Tensor &K,Tensor &dy,Tensor &ws_bytes,float factor,ExecutionContext const &ec)
          {
-@@ -335,7 +410,11 @@ namespace core {
+@@ -335,7 +411,11 @@ namespace core {
              int w = dx.shape()[3];
  
              int p=0;
@@ -180,7 +181,7 @@ index b090e4c..48de716 100644
  
              conv_kernel_bwd_.setArg(p++,config_.channels_out);
              conv_kernel_bwd_.setArg(p++,config_.channels_in);
-@@ -349,25 +428,53 @@ namespace core {
+@@ -349,25 +429,53 @@ namespace core {
              bw_conv_data_.setArg(p++,h);
              bw_conv_data_.setArg(p++,w);
  
@@ -239,7 +240,7 @@ index b090e4c..48de716 100644
      };
  
      class Conv2DBackwardFilterWinograd: public Conv2DBackwardFilter  {
-@@ -383,40 +490,187 @@ namespace core {
+@@ -383,40 +491,187 @@ namespace core {
          {
              int h = config.shape[2];
              int w = config.shape[3];
@@ -434,7 +435,7 @@ index b090e4c..48de716 100644
                  ExecutionContext ec1 = ec.generate_series_context(0,2);
                  ExecutionContext ec2 = ec.generate_series_context(1,2);
                  s_.enqueue(factor,dK,ec1);
-@@ -430,7 +684,10 @@ namespace core {
+@@ -430,7 +685,10 @@ namespace core {
          Conv2DSettings config_;
          Scale s_;
          cl::Kernel bw_conv_filter_;
@@ -445,7 +446,7 @@ index b090e4c..48de716 100644
      };
  
      struct DepthwiseSeparableBase {
-@@ -701,12 +958,36 @@ namespace core {
+@@ -701,12 +959,36 @@ namespace core {
              && config.pad[0] == 1;
      }
  
@@ -483,7 +484,7 @@ index b090e4c..48de716 100644
          bool win = is_winograd_compatible(ctx,config);
          bool dsc = is_depthwise_separable_compatible(config);
  
-@@ -727,8 +1008,9 @@ namespace core {
+@@ -727,8 +1009,9 @@ namespace core {
          }
          return r;
      }
@@ -494,7 +495,7 @@ index b090e4c..48de716 100644
          bool win = is_winograd_compatible(ctx,config);
          bool dsc = is_depthwise_separable_compatible(config);
  
-@@ -749,8 +1031,9 @@ namespace core {
+@@ -749,8 +1032,9 @@ namespace core {
          }
          return r;
      }
@@ -864,7 +865,7 @@ index b7746ba..d45058a 100644
 +    dst[i] = (beta == 0) ? s : (dst[i] * beta + s);
 +}
 diff --git a/src/kernels/winograd_bwd_filter.cl b/src/kernels/winograd_bwd_filter.cl
-index 095039b..3c45c4f 100644
+index 095039b..c1400e5 100644
 --- a/src/kernels/winograd_bwd_filter.cl
 +++ b/src/kernels/winograd_bwd_filter.cl
 @@ -100,52 +100,55 @@ float16 transform_tile(float4 a[4])
@@ -1180,10 +1181,10 @@ index 095039b..3c45c4f 100644
 +#if USE_SPLIT_PLANES
 +                // Split-K writes its slice to a private plane of the workspace
 +                // and a separate pass reduces them, instead of an emulated
-+                // atomic add. Off by default: see ../../../OPENCL-PERF.md, this
-+                // is measurably faster but shows a rare wrong dW when the same
-+                // workspace is also used by backward-data, and the cause is not
-+                // yet understood.
++                // atomic add. On by default. (The rare wrong dW this path once
++                // showed was the GPU clock governor's idle-floor voltage, not
++                // the kernel: OPENCL-PERF.md, Finding 3, in
++                // mxreyer/pytorch-dlprim-gfx1013.)
 +                ptr += (ulong)get_global_id(2) * 9 * (ulong)N * (ulong)C;
 +                #pragma unroll
 +                for(int i=0;i<9;i++) {
@@ -1223,7 +1224,7 @@ index 095039b..3c45c4f 100644
 +    dst[i] = (beta == 0) ? s : (dst[i] * beta + s);
 +}
 diff --git a/src/kernels/winograd_fwd.cl b/src/kernels/winograd_fwd.cl
-index df8e2de..e7fd565 100644
+index df8e2de..494c96d 100644
 --- a/src/kernels/winograd_fwd.cl
 +++ b/src/kernels/winograd_fwd.cl
 @@ -69,9 +69,10 @@ float16 transform_tile(float4 a[4])
@@ -1247,7 +1248,7 @@ index df8e2de..e7fd565 100644
  }
  
  
-@@ -171,7 +171,12 @@ __kernel void winconv_calc_gkgt_3x3(int N,int C,
+@@ -171,7 +171,13 @@ __kernel void winconv_calc_gkgt_3x3(int N,int C,
      if(n >= N || c>= C)
          return;
      float16 kern = load_3x3_kernel_and_transform(gk3 + (C * n + c) * 9);
@@ -1256,12 +1257,13 @@ index df8e2de..e7fd565 100644
 +    // 32 consecutive output features per wave, so this layout makes that read
 +    // contiguous. With [n][c] the 32 lanes read at a stride of C*64 bytes, and
 +    // on the BC-250 that alone cost 39% of the forward kernel's time (measured
-+    // by reading the wrong-but-coalesced address, see ../../../OPENCL-PERF.md).
++    // by reading the wrong-but-coalesced address; OPENCL-PERF.md, Finding 10,
++    // in mxreyer/pytorch-dlprim-gfx1013).
 +    k4[N * c + n] = kern;
  }
  
  
-@@ -196,6 +201,30 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+@@ -196,6 +202,30 @@ inline void store_local(__local float *l_val,int strd,float16 v)
          l_val[15*strd] = v.sf;
  }
  
@@ -1292,7 +1294,7 @@ index df8e2de..e7fd565 100644
  #define WG_SIZE 256
  #define TILES_IN_WG 32
  #define KERNELS_IN_WG 32
-@@ -260,7 +289,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+@@ -260,7 +290,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
      int half_H = (H+1)/2;
      int half_WG = half_W * half_H;
  
@@ -1301,7 +1303,7 @@ index df8e2de..e7fd565 100644
  
  #define l_tile_stride (TILES_IN_WG * WG_K + STRIDE_OFFSET)
  #define l_kern_stride (KERNELS_IN_WG * WG_K + STRIDE_OFFSET)
-@@ -312,8 +341,8 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+@@ -312,8 +342,8 @@ void winconv_3x3(int B, int N,int C,int H,int W,
  
      #define s_img_tile(k,t,indx) wg_local_memory[(k)*(TILES_IN_WG/2*16 + TR_STRIDE_OFFSET) + (t/2) * 16 + (indx)]
      
@@ -1312,7 +1314,7 @@ index df8e2de..e7fd565 100644
  
      // GEMM
  
-@@ -322,24 +351,73 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+@@ -322,24 +352,73 @@ void winconv_3x3(int B, int N,int C,int H,int W,
      int my_gemm_tile_kr = my_gemm_tile_tk / (TILES_IN_WG / PATCH_T) * PATCH_K;
      int my_gemm_tile_tl = my_gemm_tile_tk % (TILES_IN_WG / PATCH_T) * PATCH_T;
  
@@ -1394,7 +1396,7 @@ index df8e2de..e7fd565 100644
          #pragma unroll
          for(int dk=0;dk<WG_K;dk++) {
              float p_kern[PATCH_K];
-@@ -361,6 +439,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+@@ -361,6 +440,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
                  }
              }
          }
@@ -1402,7 +1404,7 @@ index df8e2de..e7fd565 100644
          barrier(CLK_LOCAL_MEM_FENCE);
      }
  
-@@ -378,7 +457,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+@@ -378,7 +458,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
              #pragma unroll
              for(int dc=0;dc<PATCH_T;dc+=2) {
                  int tile_c = dc + dc_split + my_gemm_tile_tl;
@@ -1411,7 +1413,7 @@ index df8e2de..e7fd565 100644
               }
          }
          
-@@ -389,7 +468,11 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+@@ -389,7 +469,11 @@ void winconv_3x3(int B, int N,int C,int H,int W,
              
              int s_col_t = s_col_t0 + dc + dc_split;
  

@@ -7,7 +7,7 @@
 
 On gfx1013 (AMD BC-250, Cyan Skillfish) rusticl reports
 `CL_DEVICE_LOCAL_MEM_TYPE = CL_GLOBAL`, i.e. that `__local` memory is emulated in
-global memory. The device has real on-chip LDS, and it measures 8.7× faster than
+global memory. The device has real on-chip LDS, and it measures 13.7× faster than
 global memory. `CL_DEVICE_LOCAL_MEM_SIZE` is reported correctly (65536).
 
 ## Environment
@@ -33,10 +33,11 @@ A kernel reading from a `__local` array versus the same access pattern against a
 
 | | bandwidth |
 | --- | ---: |
-| `__local` read | 3,139 GB/s |
+| `__local` read | 4,902 GB/s |
 | `__global` read (512 MiB working set) | 359 GB/s |
 
-8.7×, which is not something a global-memory emulation of `__local` can produce.
+13.7× (~122 B/clk/WGP, the hardware figure), which is not something a
+global-memory emulation of `__local` can produce.
 Reproducer: https://github.com/mxreyer/pytorch-dlprim-gfx1013 `tools/ocl-micro.c`,
 tests `lds` and `bw`.
 
@@ -46,8 +47,7 @@ tests `lds` and `bw`.
 `__local` buys nothing, and OpenCL BLAS/DNN libraries that auto-tune read it to
 decide whether to use a tiled algorithm at all. On this device that decision
 would be exactly backwards: a tiled kernel fed from `__local` is the only way to
-get near peak, and LDS bandwidth is in fact the binding constraint for such
-kernels here.
+get near peak on this device.
 
 ## Expected
 

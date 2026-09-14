@@ -32,18 +32,18 @@ looks like it is.
 
 | # | Finding | Where | Status |
 | - | --- | --- | --- |
-| 1 | `fma()` compiles to a **563-instruction software emulation**, 120× slower than `mad()` | libclc packaging | fixed in our kernels (`gelu_mad.patch`) |
+| 1 | `fma()` compiles to a **563-instruction software emulation**, 120× slower than `mad()` | rusticl < 26.2 (never tells libclc the device has hardware fma) | fixed in our kernels (`gelu_mad.patch`); native on Mesa 26.2 |
 | 2 | Winograd backward-filter launches **16 work-groups onto 40 CUs** | dlprimitives heuristic | fixed (`winograd_ksplit.patch`) |
 | 3 | Both backward kernels run on **emulated float atomics** — a third of the training step. Removing them is worth **+46%**. The "ACO `s_waitcnt` bug" that kept the fix gated for two weeks was the **clock governor's idle-floor undervolt** (1000 MHz @ 718 mV) | half silicon, half `dlprimitives`, then a config file | **fixed and shipping**: 1,374 img/s, no driver flags; voltage restored to the governor default |
 | 4 | rusticl **misreports** LDS and cache as absent | rusticl device info | reports drafted in `upstream/`; no impact on this stack |
 | 5 | Throttling / launch overhead / memory bandwidth / wrong conv algorithm | — | **all ruled out** |
-| 6 | The remaining gap is **the backward passes**, running at half the forward pass's efficiency; a T4 reaches 64% of its paper number where this reaches 21.6% | `dlprimitives` kernels | measured (this corrects an earlier wrong conclusion) |
+| 6 | The remaining gap is **the backward passes**, running at half the forward pass's efficiency; a T4 reaches 64% of its paper number where this reached 21.6% at the time (45.7% now) | `dlprimitives` kernels | measured (this corrects an earlier wrong conclusion) |
 | 7 | Wave size is per-kernel, and rusticl picks one globally: `AMD_DEBUG=w32cs` is **+13% on GEMM, −5% on this conv workload** | rusticl / radeonsi | measured; matters for matmul-heavy work |
 | 8 | The libclc in the shipped image **cannot link `sin()`, `cos()`, `tan()`, `fma()`, `remquo()`** — `torch.randn(device="ocl:0")` fails to compile | Fedora `libclc-spirv` 22.1.8 (F44 and F45) | **fixed**: Mesa's patched libclc now ships in the image (also removes the start-up warning) |
-| 9 | Image moved to **Fedora 45 / Mesa 26.2.2**: `fma()` native, everything correct, training within noise of 44 | Fedora 45 | shipping |
-| 12 | **Software pipelining**: prefetching the next K step's tiles into registers before the GEMM | `dlprimitives` kernels | **shipping**: 2,055 img/s / 7,064 inference at fp32 (T4: 2,294 / 7,217); 2,987 / 10,279 in fp16 mode. LDS double-buffering and fp32-accumulate mixed precision measured and rejected |
-| 11 | **fp16 inner loop for the Winograd kernels** (`DLPRIM_CONV_FP16=1`, opt-in): packed `v_pk_fma_f16` runs at 91% of the 2× fp16 peak through rusticl; fp32 tensors in and out, fp16 LDS tiles and accumulation over one K slice | `dlprimitives` kernels | **shipping, opt-in**: 2,714 img/s training (acc 0.928), **9,584 inference** — both past the T4's fp32 numbers; Y/dX/dW within ~0.5% of fp32 |
+| 9 | Image moved to **Fedora 45 / Mesa 26.2.2**: `fma()` native, everything correct, training within noise of 44 | Fedora 45 | shipping (Finding 3, *On Mesa 26.2…*; Finding 8; HANDOFF.md, stage 4) |
 | 10 | With the profile finally honest, four **memory access patterns**: a strided transformed-kernel read in forward Winograd (39% of that kernel), lane-to-channel mapping and scalar edge loads in backward-filter, and a BatchNorm reduction that hit the same cache sets every step (13 GB/s) | `dlprimitives` kernels | **fixed and shipping**: 1,460 → **1,963 img/s** in the isolated step; **1,816** over 16 epochs, inference **4,433 → 6,418** |
+| 11 | **fp16 inner loop for the Winograd kernels** (`DLPRIM_CONV_FP16=1`, opt-in): packed `v_pk_fma_f16` runs at 91% of the 2× fp16 peak through rusticl; fp32 tensors in and out, fp16 LDS tiles and accumulation over one K slice | `dlprimitives` kernels | **shipping, opt-in**: 2,714 img/s training (acc 0.928), **9,584 inference** — both past the T4's fp32 numbers; Y/dX/dW within ~0.5% of fp32 |
+| 12 | **Software pipelining**: prefetching the next K step's tiles into registers before the GEMM | `dlprimitives` kernels | **shipping**: 2,055 img/s / 7,064 inference at fp32 (T4: 2,294 / 7,217); 2,987 / 10,279 in fp16 mode. LDS double-buffering and fp32-accumulate mixed precision measured and rejected |
 
 ## First: where does the time actually go?
 
@@ -660,14 +660,11 @@ plausible number instead of a 2e9 one and slips under the tolerance. Same bug,
 invisible. That also explains why repeating one shape 400 times never fails: the
 stale value is the previous iteration's near-identical one.
 
-I could not close it, so I did not ship a change that depends on it being
-harmless. Both paths remain in the tree, off, with the measurements attached and
-a reproducer next to them.
-
-So BENCHMARK.md's *"the gap is software, not silicon"* still needs its asterisk:
-about a third of a training step goes on emulating the missing instruction,
-roughly half of that is avoidable in principle, and taking it needs the
-workspace question settled first.
+That was where it stood before *It was the voltage*: the paths stayed in the
+tree, off, until the clock pin showed the stale LDS read was the governor's
+idle-floor voltage. They ship on by default now, and BENCHMARK.md's *"the gap
+is software, not silicon"* no longer needs an asterisk for the atomics —
+neither backward kernel emulates the missing instruction any more.
 
 ## Finding 4 — rusticl misreports two device properties
 
@@ -697,7 +694,7 @@ Neither one hurts this stack: `dlprimitives` reads `CL_DEVICE_LOCAL_MEM_SIZE`
 type fields. It will mislead any library that auto-tunes off them, which is the
 normal thing for an OpenCL BLAS to do — a tuner reading these would conclude
 that tiling through `__local` is pointless and that there is no cache to block
-for, on a GPU where `__local` is 8.7× faster than global and the cache is worth
+for, on a GPU where `__local` is 13.7× faster than global and the cache is worth
 2.5×.
 
 ## Finding 5 — what turned out *not* to be the problem
@@ -762,7 +759,7 @@ ALU peak in the forward direction and 20–25% in the backward directions**. The
 next section works out how much of that is reachable, and gets it wrong once
 before getting it right.
 
-## Where the rest of the gap goes
+## Finding 6 — where the rest of the gap goes
 
 > **Correction.** An earlier version of this section concluded that the
 > convolutions were "close to the practical ceiling of this device", pinned by
@@ -860,6 +857,9 @@ higher than 5.6.
 
 ### Where the gap actually sits
 
+> Written at the 972 img/s state; the split below is that state's. Findings
+> 10 and 12 have since taken the step past the ~1,790 img/s projected here.
+
 This part does not depend on knowing the ceiling, because it is a comparison
 within the stack. The forward convolutions run at **4,074 GFLOP/s**. The whole
 training step averages **2,544**. So everything else — the two backward passes,
@@ -894,7 +894,7 @@ after two weeks behind a misdiagnosis, shipped: 972 → 1,374 img/s. What is
 left in the backward passes is the ordinary kind of gap: kernel efficiency
 against cuDNN, not a hazard.
 
-## The wave32 experiment
+## Finding 7 — the wave32 experiment
 
 Before the correction above, the working theory was that wave64 pins the
 register tile at R=11 and that wave32 would lift the ceiling. The register-tile
@@ -1151,7 +1151,8 @@ knows the geometry and masks those elements instead; verified on odd sizes,
 
 Convolution is now 79% of the step (50 of 64 ms), split almost evenly between
 the three Winograd kernels, and each of them runs at roughly the same rate per
-FLOP. What is left in them is the pipelining work Finding 6 describes. The
+FLOP. What was left in them was the pipelining work Finding 6 describes,
+done in Finding 12. The
 non-convolution remainder is 14 ms spread over a dozen small kernels, the
 largest being 1.5 ms; the SGD optimizer alone is 110 launches of ~10 µs.
 
@@ -1332,9 +1333,13 @@ target.
 [HANDOFF.md](HANDOFF.md) has the same list in priority order, with the
 constraints and dead ends a fresh start would otherwise rediscover.
 
-- **Backward-data's atomics.** Done — the parity-plane kernel below ships by
-  default. Worth sending upstream to `dlprimitives`, together with the
-  split-K planes for backward-filter, the occupancy fix, and Finding 10's four
+- **Backward-data's atomics.** Done — the parity-plane kernel ships by
+  default: Winograd's 4×4 input-gradient tiles overlap, but tiles of the same
+  row- and column-parity are 4 apart in each direction, so within one of the
+  four parity classes the patches are exactly disjoint (`USE_PLANES` in
+  `winograd_bwd_data.cl`). With backward-filter's split-K planes too, 972 →
+  1,374 img/s (Finding 3). Worth sending upstream to `dlprimitives`, together
+  with the split-K planes, the occupancy fix, and Finding 10's four
   access-pattern fixes — all of which are generic, not BC-250-specific.
 - **Per-kernel wave size.** Tested and reported above: the right choice differs
   per kernel and rusticl picks one globally. Nothing more to measure locally;
@@ -1346,15 +1351,6 @@ constraints and dead ends a fresh start would otherwise rediscover.
 - **`ACO_DEBUG` not being in the shader cache key** is still true and still a
   small Mesa footgun, but with no `ACO_DEBUG` in use here it no longer matters
   to this box.
-- **`winograd_3x3_main_bwd`'s atomics — ~21% of the step; the trick works.** Backward-data accumulates because Winograd's 4×4 input-gradient
-  tiles overlap: with stride 2 and extent 4, every output pixel is touched by
-  exactly four tiles — the two neighbouring tile-rows and the two neighbouring
-  tile-columns. But tiles of the *same* row-parity and column-parity are 4 apart
-  in each direction, so **within one of the four parity classes the patches are
-  exactly disjoint**. Implemented as the `USE_PLANES` path in
-  `winograd_bwd_data.cl`, on by default; with backward-filter's split-K planes
-  too the training step runs at 1,374 img/s (16-epoch figure in
-  BENCHMARK.md).
 - **A real fp16 tensor path.** Finding 11 put fp16 where the time was; the
   rest of the stack (matmul, linear, pooling, softmax, loss, BatchNorm, autocast)
   is fp32-only or broken for half tensors — `tools/half-probe.py` lists it.
@@ -1365,9 +1361,7 @@ constraints and dead ends a fresh start would otherwise rediscover.
 - **The non-convolution 14 ms.** A third of the fp16-mode step now: BatchNorm
   (~3 ms), activation forward/backward (~2.5), pooling (~1.6), the SGD
   optimizer's 110 launches (~1.3), the planes reduce (~1.4). BN+ReLU fusion and
-  a fused optimizer are the two obvious moves. That is the standard technique for exactly the latency problem
-  that caps them, and it is the most likely route to closing the forward-pass
-  gap to cuDNN.
+  a fused optimizer are the two obvious moves.
 - **Where the real ceiling is.** Not established. Every attempt to measure it
   here produced a number that a better kernel then beat.
 - **libclc.** Done — Mesa's patched libclc now ships in the notebook image

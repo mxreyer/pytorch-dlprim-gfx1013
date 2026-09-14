@@ -63,7 +63,7 @@ problem, see [the image's README](https://github.com/mxreyer/bc250-jupyterhub-op
 `dlprimitives/src/kernels/reduce.h`, an `#ifndef CUSTOM_REDUCE` block picks
 between the OpenCL 2.0 built-ins and a hand-written reduction using
 `__local` memory + `barrier()`, which needs nothing past OpenCL 1.2. That
-fallback is off by default (`CUSTOM_REDUCE 0`). This directory forces it on.
+fallback is off by default (`CUSTOM_REDUCE 0`). The patch forces it on.
 
 There's no need to touch Mesa, libclc, or anything else on the system —
 this is entirely a rebuild of one out-of-tree Python package inside its own

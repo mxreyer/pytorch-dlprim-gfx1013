@@ -21,8 +21,8 @@ when the GPU runs below its voltage floor; see OPENCL-PERF.md, Finding 3.
   busctl --system call com.cyanskillfish.Governor /com/cyanskillfish/Governor \
       com.cyanskillfish.Governor.PerformanceMode SetRange uu 1000 1000
 
-Needs a torch + pytorch_ocl environment (pytorch-dlprim-fix/build.sh makes one
-in scratch/venv, or run it inside the notebook image). CPU reference gradients
+Needs a torch + pytorch_ocl environment (build.sh at the top of this repository
+makes one in scratch/venv, or run it inside the notebook image). CPU reference gradients
 are computed once and cached next to this script. ~1 minute per 100 sweeps.
 
 MIT License, Copyright (c) 2026 mxreyer.

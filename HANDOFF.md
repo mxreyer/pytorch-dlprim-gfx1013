@@ -157,6 +157,26 @@ CPU.
 discrepancy. It was the test copying module state after the CPU forward; the
 stats match to 1e-7. `tools/bn-stats.py` checks the momentum arithmetic.)
 
+## 7. Where the ceiling really is — unresolved
+
+Every attempt to measure the practical ceiling here produced a number a
+better-written program later beat (2.7 → 4.9 TB/s LDS, twice over). The forward
+convolutions run at ~40% of ALU peak and a T4 converts 64% of its paper number
+against this board's 45.7% (22% before stage 5, 30.6% after, 40.4% after
+stage 6), so there is room, but the cheap wins are taken: the three Winograd
+kernels are 77% of the fp32 step, run at the same rate per FLOP, and what
+remains in them is structural. Software pipelining, the standard next step, is
+done as far as it pays on this chip (stage 10: register prefetch shipped, LDS
+double-buffering loses to occupancy); past that is a different kernel
+structure, i.e. a rewrite.
+
+## 8. A second GPU
+
+Less urgent than it was — there is no Mesa bug to triangulate. Still
+interesting for performance: RDNA3 has the hardware fp32 atomic add this whole
+investigation works around, so the planes-vs-atomics trade would look
+different there.
+
 ## 9. fp16 — the inner loop is done, the tensor path is not
 
 Measured first (`tools/fp16-micro.c`, GPU pinned): packed `v_pk_fma_f16`
@@ -200,25 +220,6 @@ fp32 on this chip. Both are documented, neither is in the tree. The planes
 zero-fill is gone too (masked in the reduce). What is left in the Winograd
 kernels is structural; the non-convolution 14 ms is now the better target
 (BN+ReLU fusion, a fused optimizer).
-
-## 7. Where the ceiling really is — unresolved
-
-Every attempt to measure the practical ceiling here produced a number a
-better-written program later beat (2.7 → 4.9 TB/s LDS, twice over). The forward
-convolutions run at ~40% of ALU peak and a T4 converts 64% of its paper number
-against this board's 45.7% (22% before stage 5, 30.6% after, 40.4% after
-stage 6), so there is room, but the cheap wins are taken: the three Winograd
-kernels are 77% of the fp32 step, run at the same rate per FLOP, and what
-remains in them is structural. Software pipelining — prefetching the next `__local` tile
-during the current tile's arithmetic — is the standard technique none of the
-kernels here use, and the most likely next gain.
-
-## 8. A second GPU
-
-Less urgent than it was — there is no Mesa bug to triangulate. Still
-interesting for performance: RDNA3 has the hardware fp32 atomic add this whole
-investigation works around, so the planes-vs-atomics trade would look
-different there.
 
 ## Constraints to carry forward
 
