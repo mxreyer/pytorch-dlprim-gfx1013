@@ -514,8 +514,8 @@ is in that check precisely because forgetting it produces a configuration that
 looks fast and is quietly wrong, which is the worst possible failure mode.
 
 If the ACO bug is fixed upstream, `force-waitcnt` goes away and the full ~65%
-becomes available. That is the case for filing it:
-`upstream/aco-lds-waitcnt-gfx1013.md`.
+becomes available. That was the case for filing it — a report
+was drafted, and withdrawn (see below).
 
 ### On Mesa 26.2 it looked worse, and `force-waitcnt` looked like less of a fix
 
@@ -1352,8 +1352,8 @@ constraints and dead ends a fresh start would otherwise rediscover.
   the fix is an upstream feature request for a way to pin a kernel's subgroup
   size.
 - **The "ACO `s_waitcnt` bug".** There was none — Finding 3, *It was the
-  voltage*. `upstream/aco-lds-waitcnt-gfx1013.md` is withdrawn and kept only as
-  a record of how convincing a wrong diagnosis can look.
+  voltage*. The draft report was withdrawn before filing and has since been
+  removed from the repository; this Finding is the record.
 - **`ACO_DEBUG` not being in the shader cache key** is still true and still a
   small Mesa footgun, but with no `ACO_DEBUG` in use here it no longer matters
   to this box.

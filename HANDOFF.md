@@ -53,10 +53,10 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
 
 ## Done, for the record
 
-- **The "ACO bug" report** (`upstream/aco-lds-waitcnt-gfx1013.md`) is
-  withdrawn and kept as a record of how a voltage problem impersonates a
-  compiler bug. Its one still-valid observation — `ACO_DEBUG` is not part of
-  Mesa's shader cache key — no longer matters here.
+- **The "ACO bug" report** was withdrawn before filing and has been
+  removed. Its one still-valid observation — `ACO_DEBUG` is not part of
+  Mesa's shader cache key, so ACO experiments need
+  `MESA_SHADER_CACHE_DISABLE=true` — no longer matters here.
 - **libclc.** Fedora's `libclc-spirv` 22.1.8 cannot link `sin()`, `cos()` or
   `fma()`, which takes `torch.randn` on the device down with it. Mesa's libclc
   fork fixes it as a drop-in. It did *not* fix `work_group_reduce_*` (a
