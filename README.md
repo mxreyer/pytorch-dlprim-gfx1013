@@ -24,8 +24,8 @@ ResNet-9 layer shape.
 
 | | |
 | --- | --- |
-| [OPENCL-PERF.md](OPENCL-PERF.md) | The full investigation: every measurement, dead end and fix. Long by design; the reference for anyone continuing this work. |
-| [HANDOFF.md](HANDOFF.md) | Where things stand, what is still open, the constraints to keep in mind. |
+| [OPENCL-PERF.md](OPENCL-PERF.md) | Claude's full investigation: every measurement, dead end and fix. Long by design; the reference for anyone continuing this work. |
+| [HANDOFF.md](HANDOFF.md) | Where things stand, what is still open, the constraints to keep in mind. (For a future Claude session.) |
 | `tools/` | Microbenchmarks (`ocl-micro.c`, `libclc-probe.c`, `fp16-micro.c`), correctness sweeps (`wino-repro.py`, `bn-check.py`, ...), a Mesa-from-source container (`mesa-dev/`). |
 | `upstream/` | Bug reports for Mesa/rusticl, including one withdrawn and kept as a record. |
 
