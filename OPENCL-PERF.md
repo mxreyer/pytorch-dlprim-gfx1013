@@ -17,10 +17,6 @@ and those are worth as much as the fixes. The last section accounts for the
 gap that remains once they are all subtracted, which is mostly not where it
 looks like it is.
 
-> Prefer this without the jargon? [PERF-EXPLAINED.md](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s/blob/main/PERF-EXPLAINED.md) tells
-> the same story for a reader with no GPU background, and spends longer on why
-> no GPU reaches its theoretical number.
-
 > Reproduce the hardware measurements with
 > `tools/ocl-micro.c`:
 > ```

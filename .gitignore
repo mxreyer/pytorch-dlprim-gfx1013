@@ -6,3 +6,5 @@
 /tools/wino-repro-refs*.pt
 __pycache__/
 *.pyc
+# plain-language write-up, kept local
+/PERF-EXPLAINED.md

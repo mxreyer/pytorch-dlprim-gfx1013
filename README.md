@@ -11,8 +11,7 @@ This is the `pytorch_ocl` half of [bc250-jupyterhub-opencl-k3s](https://github.c
 JupyterHub-on-k3s setup for the same board. That repo's notebook image
 installs the `pt_ocl.so` published on this repo's
 [releases page](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases),
-pinned by sha256; the plain-language version of the story below is its
-[PERF-EXPLAINED.md](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s/blob/main/PERF-EXPLAINED.md).
+pinned by sha256.
 
 | | |
 | --- | --- |

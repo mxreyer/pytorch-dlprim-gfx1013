@@ -1,8 +1,7 @@
 # Handoff: what is open, and where to start
 
 State as of 2026-09-14, at the end of the performance investigation written up in
-[OPENCL-PERF.md](OPENCL-PERF.md) (technical) and
-[PERF-EXPLAINED.md](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s/blob/main/PERF-EXPLAINED.md) (plain language).
+[OPENCL-PERF.md](OPENCL-PERF.md).
 
 Nothing here is required to *use* the box. The shipped configuration is correct
 and verified. Everything below is either done-and-recorded or a lead for later.
