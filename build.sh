@@ -1,29 +1,17 @@
 #!/usr/bin/env bash
-# Rebuild pytorch_ocl (pytorch_dlprim) with the four BC-250 patches applied:
-#   custom_reduce.patch   - portable work-group reduction; rusticl has no
-#                           work_group_reduce_* built-ins (correctness)
-#   winograd_ksplit.patch - fill all CUs in Winograd backward-filter, replace
-#                           both backward kernels' emulated fp32 atomics with
-#                           plane writes + a reduce, coalesce four access
-#                           patterns, prefetch, opt-in fp16 inner loop
-#                           (909 -> 2,055 img/s; 2,987 with DLPRIM_CONV_FP16=1)
-#   gelu_mad.patch        - fma() is software-emulated on rusticl < Mesa 26.2;
-#                           use mad() (redundant, harmless on 26.2)
-#   pytorch_ocl_half_fixes.patch - reject non-float32 tensors in convolution
-#                           (they silently produced NaN); dtype-correct
-#                           hardtanh/relu6/clamp; contiguous grad in hardtanh_backward
-# See README.md for why, and OPENCL-PERF.md for the
-# measurements behind the two performance patches.
+# Rebuild pytorch_ocl (pytorch_dlprim) with the four gfx1013 patches applied.
+# See README.md for what they do and OPENCL-PERF.md for the measurements.
 #
-# Self-contained: run from anywhere. It builds a throwaway Python 3.12 venv in
-# ./scratch (gitignored) with the SAME torch + pytorch_ocl the notebook image
-# uses, applies the patches, and drops the rebuilt pt_ocl.so next to this script.
+# Self-contained: run from anywhere. Builds a Python 3.12 venv in ./scratch
+# (gitignored) with torch 2.4.0 + the pytorch_ocl 0.2.0 wheel, fetches the
+# pinned upstream sources, applies the patches, and leaves the rebuilt
+# pt_ocl.so next to this script.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRATCH="$HERE/scratch"
 VENV="$SCRATCH/venv"
 
-# Match the bc250-jupyterhub-opencl-k3s notebook image exactly.
+# The torch the wheel was built against; pybind11 for the extension build.
 TORCH_VERSION="2.4.0"
 PYBIND11_VERSION="3.1.0"
 PYTORCH_OCL_WHL="https://github.com/artyom-beilis/pytorch_dlprim/releases/download/0.2.0/pytorch_ocl-0.2.0+torch2.4-cp312-none-linux_x86_64.whl"
@@ -104,8 +92,8 @@ strip --strip-unneeded "$HERE/pt_ocl.so"
 
 echo
 echo "Built and staged: $HERE/pt_ocl.so"
-echo "  - to ship it: sha256sum pt_ocl.so, attach to a GitHub release, pin in the notebook image's Dockerfile"
-echo "  - to try it in the scratch venv directly:"
-echo "      cp '$SCRATCH/build/pytorch_ocl/pt_ocl.so' \\"
-echo "         '$VENV/lib/python3.12/site-packages/pytorch_ocl/pt_ocl.so'"
+echo "  - to try it in the scratch venv:"
+echo "      install -m0644 '$HERE/pt_ocl.so' '$VENV/lib/python3.12/site-packages/pytorch_ocl/pt_ocl.so'"
 echo "      rm -f ~/.dlprimitives/cache.db   # old cache keyed to the old kernel source"
+echo "      RUSTICL_ENABLE=radeonsi '$VENV/bin/python' '$HERE/tools/wino-repro.py' 10"
+echo "  - to ship it: sha256sum pt_ocl.so, attach to a GitHub release"

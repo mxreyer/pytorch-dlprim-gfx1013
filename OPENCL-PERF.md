@@ -1,9 +1,15 @@
 # What is actually slow on the BC-250's OpenCL path
 
-[BENCHMARK.md](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s/blob/main/BENCHMARK.md) ends on a claim: *"The gap is software, not
+[BENCHMARK.md](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s/blob/main/BENCHMARK.md)
+in the bc250-jupyterhub-opencl-k3s repository had ResNet-9 training 2.5×
+slower than a cloud T4 and ended on a claim: *"The gap is software, not
 silicon."* This is that claim taken apart. Every number below was measured on
 the box — 40 CU, 2.0 GHz, kernel 7.1.13; Fedora 44 / Mesa 26.1.8 on the host,
-and from 2026-09-10 Fedora 45 / Mesa 26.2.2 in the notebook image.
+and from 2026-09-10 Fedora 45 / Mesa 26.2.2 in a container. The img/s figures
+are from that repository's
+[benchmark.py](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s/blob/main/benchmark.py)
+(ResNet-9 on CIFAR-10, batch 128, 16 epochs, CPU-side augmentation);
+"isolated step" numbers are the GPU step alone (`tools/profile-step.py`).
 
 Five of the findings turned into fixes that are in this repo, worth **2.26×**
 on training throughput (909 → 2,055 img/s) and 1.57× on inference (4,489 →
@@ -39,7 +45,7 @@ looks like it is.
 | 5 | Throttling / launch overhead / memory bandwidth / wrong conv algorithm | — | **all ruled out** |
 | 6 | The remaining gap is **the backward passes**, running at half the forward pass's efficiency; a T4 reaches 64% of its paper number where this reached 21.6% at the time (45.7% now) | `dlprimitives` kernels | measured (this corrects an earlier wrong conclusion) |
 | 7 | Wave size is per-kernel, and rusticl picks one globally: `AMD_DEBUG=w32cs` is **+13% on GEMM, −5% on this conv workload** | rusticl / radeonsi | measured; matters for matmul-heavy work |
-| 8 | The libclc in the shipped image **cannot link `sin()`, `cos()`, `tan()`, `fma()`, `remquo()`** — `torch.randn(device="ocl:0")` fails to compile | Fedora `libclc-spirv` 22.1.8 (F44 and F45) | **fixed**: Mesa's patched libclc now ships in the image (also removes the start-up warning) |
+| 8 | Fedora's libclc **cannot link `sin()`, `cos()`, `tan()`, `fma()`, `remquo()`** — `torch.randn(device="ocl:0")` fails to compile | Fedora `libclc-spirv` 22.1.8 (F44 and F45) | **fixed**: Mesa's patched libclc as a drop-in (also removes the start-up warning) |
 | 9 | Image moved to **Fedora 45 / Mesa 26.2.2**: `fma()` native, everything correct, training within noise of 44 | Fedora 45 | shipping (Finding 3, *On Mesa 26.2…*; Finding 8; HANDOFF.md, stage 4) |
 | 10 | With the profile finally honest, four **memory access patterns**: a strided transformed-kernel read in forward Winograd (39% of that kernel), lane-to-channel mapping and scalar edge loads in backward-filter, and a BatchNorm reduction that hit the same cache sets every step (13 GB/s) | `dlprimitives` kernels | **fixed and shipping**: 1,460 → **1,963 img/s** in the isolated step; **1,816** over 16 epochs, inference **4,433 → 6,418** |
 | 11 | **fp16 inner loop for the Winograd kernels** (`DLPRIM_CONV_FP16=1`, opt-in): packed `v_pk_fma_f16` runs at 91% of the 2× fp16 peak through rusticl; fp32 tensors in and out, fp16 LDS tiles and accumulation over one K slice | `dlprimitives` kernels | **shipping, opt-in**: 2,714 img/s training (acc 0.928), **9,584 inference** — both past the T4's fp32 numbers; Y/dX/dW within ~0.5% of fp32 |
@@ -191,8 +197,8 @@ same binary with `DLPRIM_WINOGRAD_KSPLIT=stock` vs the new default:
 | adaptive K-split | **972** | **51.4** | 0.925 | 14 | 4,496 img/s |
 
 Accuracy and convergence are unchanged, and the stock run reproduces the
-published 919 img/s / 54.4 s / 0.924 in [BENCHMARK.md](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s/blob/main/BENCHMARK.md) to within
-run-to-run variance. Inference is untouched, as expected — there is no
+figures published in BENCHMARK.md (919 img/s / 54.4 s / 0.924 accuracy) to
+within run-to-run variance. Inference is untouched, as expected — there is no
 backward-filter kernel in an inference pass. Gradients match CPU to better than
 1e-5 relative for every ResNet-9 layer shape.
 
@@ -490,10 +496,10 @@ The cache flag is free — it only affects start-up compilation, not steady stat
 in the `ocl-micro` note, not a signal. Use the batch-128 figure.)
 
 So it is a **training-only trade**, and on a machine that does both it is the
-wrong trade. This particular box is a multi-user JupyterHub where the driver
-environment is fixed per user pod, not per workload — so the default stays the
-default here, and the opt-in mode is for a box dedicated to training. It needs
-four environment variables:
+wrong trade. This box is shared by several users whose driver environment is
+fixed per session, not per workload — so the default stays the default here,
+and the opt-in mode is for a box dedicated to training. It needs four
+environment variables:
 
 ```
 ACO_DEBUG=force-waitcnt MESA_SHADER_CACHE_DISABLE=true \
@@ -513,8 +519,8 @@ becomes available. That is the case for filing it:
 
 ### On Mesa 26.2 it looked worse, and `force-waitcnt` looked like less of a fix
 
-Added 2026-09-10, after building the notebook image on Fedora 45 (Mesa 26.2.2,
-same host kernel, same `pt_ocl.so`; Finding 8 has the image details). The
+Added 2026-09-10, after building a Fedora 45 container (Mesa 26.2.2, same
+host kernel, same `pt_ocl.so`; Finding 8 has the container details). The
 `tools/wino-repro.py` sweeps, 6 ResNet-9 layer shapes each, in containers with
 a fresh kernel cache:
 
@@ -538,7 +544,7 @@ load interacts with the clock governor, nothing more.)
 
 ### It was the voltage
 
-Once the notebook image could dump ISA — `AMD_DEBUG=cs,asm`; Mesa needs *both*
+Once the container could dump ISA — `AMD_DEBUG=cs,asm`; Mesa needs *both*
 the stage flag and a type flag now, which is why `cs` alone printed nothing in
 the earlier session — the barrier sequences in `winconv_3x3_bwd_filter` were
 there to read, and ACO's `aco_insert_waitcnt.cpp` was there to compare them
@@ -662,8 +668,8 @@ stale value is the previous iteration's near-identical one.
 
 That was where it stood before *It was the voltage*: the paths stayed in the
 tree, off, until the clock pin showed the stale LDS read was the governor's
-idle-floor voltage. They ship on by default now, and BENCHMARK.md's *"the gap
-is software, not silicon"* no longer needs an asterisk for the atomics —
+idle-floor voltage. They ship on by default now, and *"the gap is software, not
+silicon"* no longer needs an asterisk for the atomics —
 neither backward kernel emulates the missing instruction any more.
 
 ## Finding 4 — rusticl misreports two device properties
@@ -993,7 +999,7 @@ Please visit https://gitlab.freedesktop.org/karolherbst/mesa-libclc ... ===
 
 The hope (HANDOFF.md, stage 3) was that the fork would make two of our three
 patches unnecessary. It makes neither unnecessary — but the reason it exists
-turned out to be sitting in our image.
+turned out to be sitting in the stock Fedora container.
 
 **What the warning is.** rusticl (`core/device.rs`) looks for one symbol,
 `__clc_mesa_libclc_version`, in the libclc SPIR-V it loaded, and prints the
@@ -1008,7 +1014,7 @@ and one fix for a genuinely broken build:
 > The compiled SPIR-V libclc binaries ended up with an empty definition for
 > `__clc_flush_denormal_if_not_supported`.
 
-**What is in the image.** Fedora 44's `libclc-spirv-22.1.8-1.fc44` from
+**What Fedora ships.** Fedora 44's `libclc-spirv-22.1.8-1.fc44` from
 `updates` (built 2026-06-19) has exactly that empty definition:
 
 ```
@@ -1027,11 +1033,11 @@ part):
 
 | build | `fma` `sin` `cos` `tan` `sincos` `remquo` | `mad` `sinpi` `tanh` `exp` `log` `pow` `erf` `sqrt` `tgamma` `remainder` `fmod` `atan2` … |
 | --- | --- | --- |
-| image as shipped (`libclc-spirv` 2026-06-19) | **all fail to build** | build |
+| Fedora `libclc-spirv` as shipped (2026-06-19) | **all fail to build** | build |
 | Mesa fork 22.1.8.3 | build | build |
 
 In PyTorch terms: `dlprimitives`' random kernel does Box–Muller with
-`sin`/`cos`, so on the shipped image
+`sin`/`cos`, so on a stock Fedora container
 
 ```
 torch.randn(4096, device="ocl:0")            -> Failed to build program source random ...
@@ -1053,15 +1059,15 @@ anyway because the software branch is dead code once
 `__clc_runtime_has_hw_fma32` is defined true, but `sin`/`cos`/`tan`/`sincos`/
 `remquo` still fail (6/25 probed builtins).
 
-**Fix.** The fork publishes drop-in binaries per release. The notebook
-`Dockerfile` now `ADD`s `spirv64-mesa3d-.spv` and `spirv-mesa3d-.spv` from
-release 22.1.8.3 over `/usr/lib64/clc/`, pinned by URL and sha256. Same LLVM
-22.1.8 the container's clang is. Verified in a throwaway container with the
-files bind-mounted over the originals before touching the image: the warning is
+**Fix.** The fork publishes drop-in binaries per release. The container
+image now `ADD`s `spirv64-mesa3d-.spv` and `spirv-mesa3d-.spv` from release
+22.1.8.3 over `/usr/lib64/clc/`, pinned by URL and sha256 (`tools/mesa-dev/
+Dockerfile` does the same). Same LLVM 22.1.8 the container's clang is. Verified
+in a throwaway container with the files bind-mounted over the originals: the warning is
 gone, 24/25 probed builtins build (the 25th is `fma(double)`, no fp64 on this
 device, fails either way), `randn`/`normal_` work with mean 0.00 and std 1.00,
 and a 2-epoch ResNet-9 run in the same container is within noise of the
-shipped image (905 → 908 img/s training, 4,501 → 4,472 img/s inference,
+unpatched container (905 → 908 img/s training, 4,501 → 4,472 img/s inference,
 epoch-1 accuracy 0.824 vs 0.821).
 
 **What it does not do**, measured so nobody has to hope again:
@@ -1242,8 +1248,8 @@ fp32 callers keep fp32.
 | T4, fp32 | 2,294 | 0.926 | 7,217 |
 | T4, AMP | 4,441 | 0.923 | 7,355 |
 
-Accuracy is unchanged — 0.928 is the highest of any configuration in
-BENCHMARK.md, which is noise, but it is certainly not degradation. Training
+Accuracy is unchanged — 0.928 is the highest of any configuration measured,
+which is noise, but it is certainly not degradation. Training
 is **18% past the T4's fp32 number** and inference **33% past it**; against the
 T4 running its own mixed precision the training gap is 1.64×. The halves also
 made the CPU-side data pipeline visible: the isolated step is 44 ms (2,844
@@ -1251,8 +1257,8 @@ img/s) and the benchmark 2,714, so ~5% is now augmentation on the host.
 
 **How to use it:** the switch is read when the kernels compile, so it must be in
 the environment before the first convolution — `os.environ["DLPRIM_CONV_FP16"]
-= "1"` at the top of the notebook, before `import torch`, or in the Hub's
-spawner environment for everyone. `DLPRIM_WINOGRAD_KSPLIT_TARGET` /
+= "1"` at the top of the script or notebook, before `import torch`, or in
+the process environment. `DLPRIM_WINOGRAD_KSPLIT_TARGET` /
 `_MAX` (defaults 16 / 64 in this mode) trade dW accuracy against nothing
 measurable. It applies to 3×3 convolutions only; everything else in the
 network stays fp32. GELU, softmax, attention and the rest of a transformer's
@@ -1364,12 +1370,12 @@ constraints and dead ends a fresh start would otherwise rediscover.
   a fused optimizer are the two obvious moves.
 - **Where the real ceiling is.** Not established. Every attempt to measure it
   here produced a number that a better kernel then beat.
-- **libclc.** Done — Mesa's patched libclc now ships in the notebook image
-  (Finding 8). It did *not* do what the previous version of this bullet hoped:
+- **libclc.** Done — Mesa's patched libclc is the drop-in for any container
+  running this (Finding 8). It did *not* do what the previous version of this bullet hoped:
   `fma()` is a rusticl 26.2 fix, and `work_group_reduce_*` is a rusticl
   feature gap that no libclc fills. What it does fix is worse than either:
   `torch.randn` on the device.
-- **Mesa 26.2.** Done: the image is on Fedora 45 now. `fma()` is native
+- **Mesa 26.2.** Done: everything is verified on Fedora 45 / Mesa 26.2.2. `fma()` is native
   (`gelu_mad.patch` redundant but harmless).
 - **The governor's voltage curve.** The one thing on this box that can make
   correct code produce wrong numbers, and it lives outside this repository
