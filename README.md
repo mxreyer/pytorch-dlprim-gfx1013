@@ -1,5 +1,11 @@
 # pytorch_dlprim on gfx1013 (AMD BC-250, Mesa rusticl)
 
+> **Note:** the patches, tools and documentation in this repository were
+> heavily authored by Claude ([Claude Code](https://claude.com/claude-code),
+> Claude Opus 5), working with mxreyer on the hardware. The measurements are
+> real and were taken on the board; the prose and much of the code are the
+> model's.
+
 The `pt_ocl.so` attached to each
 [release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases) of this
 repository is what the notebook image in
@@ -178,7 +184,3 @@ AsRock BC-250 (gfx1013, 40 CU, 2.0 GHz, 16 GB unified), Linux 7.1, Mesa
 22.1.8, `RUSTICL_ENABLE=radeonsi`. On Mesa 26.1 the system libclc also cannot
 link `sin()`/`cos()` (so `torch.randn` on the device fails); Mesa's own libclc
 fork fixes that — see OPENCL-PERF.md, Finding 8.
-
----
-
-*Co-authored with [Claude Code](https://claude.com/claude-code) (Claude Opus 5).*
