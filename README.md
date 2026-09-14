@@ -184,3 +184,7 @@ AsRock BC-250 (gfx1013, 40 CU, 2.0 GHz, 16 GB unified), Linux 7.1, Mesa
 22.1.8, `RUSTICL_ENABLE=radeonsi`. On Mesa 26.1 the system libclc also cannot
 link `sin()`/`cos()` (so `torch.randn` on the device fails); Mesa's own libclc
 fork fixes that — see OPENCL-PERF.md, Finding 8.
+
+---
+
+*Co-authored with [Claude Code](https://claude.com/claude-code) (Claude Opus 5).*
