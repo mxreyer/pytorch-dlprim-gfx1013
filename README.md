@@ -110,9 +110,13 @@ virtualenv.
 3. Builds the extension and installs the stripped result at
    `./pt_ocl.so` next to the script.
 
-To publish a build: `sha256sum pt_ocl.so`, attach the file to a new release
-(`vX.Y.Z`), and update `PT_OCL_URL` / `PT_OCL_SHA256` in the notebook image's
-Dockerfile.
+The build is reproducible: source and venv paths are mapped out of the binary
+(`-ffile-prefix-map`) and no RPATH is embedded, so two runs of `build.sh` — in
+any directory, at the pinned upstream commits, with the pinned torch and
+pybind11 — give byte-identical output. To publish a build: `sha256sum
+pt_ocl.so`, attach the file to a new release (`vX.Y.Z`), and update
+`PT_OCL_VER` / `PT_OCL_SHA256` in the notebook image's Dockerfile. Anyone can
+then check a release by rebuilding.
 
 To try the rebuild in the scratch venv directly (matmul / softmax checks):
 

@@ -24,6 +24,7 @@ VENV="$SCRATCH/venv"
 
 # Match the bc250-jupyterhub-opencl-k3s notebook image exactly.
 TORCH_VERSION="2.4.0"
+PYBIND11_VERSION="3.1.0"
 PYTORCH_OCL_WHL="https://github.com/artyom-beilis/pytorch_dlprim/releases/download/0.2.0/pytorch_ocl-0.2.0+torch2.4-cp312-none-linux_x86_64.whl"
 
 # Upstream commits the patches are written against (pytorch_dlprim HEAD of
@@ -43,7 +44,7 @@ else
     "$VENV/bin/pip" install -q -U pip
     "$VENV/bin/pip" install -q "torch==$TORCH_VERSION" \
         --index-url https://download.pytorch.org/whl/cpu
-    "$VENV/bin/pip" install -q pybind11 "$PYTORCH_OCL_WHL"
+    "$VENV/bin/pip" install -q "pybind11==$PYBIND11_VERSION" "$PYTORCH_OCL_WHL"
 fi
 
 echo "== fetching pytorch_dlprim @ ${PYTORCH_DLPRIM_COMMIT:0:12} (with dlprimitives submodule) =="
@@ -71,12 +72,20 @@ git -C "$SCRATCH/src"              apply "$HERE/gelu_mad.patch"
 git -C "$SCRATCH/src"              apply "$HERE/pytorch_ocl_half_fixes.patch"
 
 echo "== configuring =="
+# -ffile-prefix-map: __FILE__ (TORCH_CHECK messages, torch's inline asserts)
+# embeds the source and venv paths ~200 times; mapping scratch/ to /scratch
+# makes the .so identical whatever directory this checkout lives in, so a
+# release's sha256 can be reproduced. CMAKE_SKIP_RPATH for the same reason:
+# the RPATH would name this venv's torch/lib, which the .so never needs -
+# `import torch` has already loaded the libtorch sonames it links against.
 mkdir -p "$SCRATCH/build"
 cd "$SCRATCH/build"
 cmake \
     -DCMAKE_PREFIX_PATH="$VENV/lib64/python3.12/site-packages/torch/share/cmake/Torch;$VENV/lib64/python3.12/site-packages/pybind11/share/cmake/pybind11" \
     -DPython3_EXECUTABLE="$VENV/bin/python3.12" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS="-ffile-prefix-map=$SCRATCH=/scratch" \
+    -DCMAKE_SKIP_RPATH=ON \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     "$SCRATCH/src"
 
