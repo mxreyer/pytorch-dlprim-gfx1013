@@ -30,7 +30,7 @@ has the T4 runs):
 Accuracy is unchanged throughout. Gradients match CPU references on every
 ResNet-9 layer shape.
 
-| | |
+| file | description |
 | --- | --- |
 | [OPENCL-PERF.md](OPENCL-PERF.md) | Claude's full investigation: every measurement, dead end and fix. Long by design; the reference for anyone continuing this work. |
 | [HANDOFF.md](HANDOFF.md) | Where things stand, what is still open, the constraints to keep in mind. (For a future Claude session.) |
