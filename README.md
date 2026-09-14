@@ -1,3 +1,7 @@
+<!-- The pt_ocl.so attached to each release here is what the notebook image in
+     https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s installs (pinned by
+     URL + sha256 in its Dockerfile). To ship a new build: run ./build.sh, tag a
+     release with pt_ocl.so attached, then bump the version and sha256 there. -->
 # pytorch_dlprim on gfx1013 (AMD BC-250, Mesa rusticl)
 
 Patches and a build script that make
