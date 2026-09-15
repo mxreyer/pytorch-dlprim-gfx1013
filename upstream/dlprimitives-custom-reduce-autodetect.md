@@ -1,7 +1,7 @@
 # dlprimitives: enable CUSTOM_REDUCE automatically when the device lacks work-group collectives
 
 **Where to file:** https://github.com/artyom-beilis/dlprimitives/issues
-**Against:** `ff2d590` (2024-09-04); `src/kernels/reduce.h`, `src/program_cache.cpp`
+**Against:** `ff2d590` (2024-09-04; the patch also applies to master `b176c15`); `src/kernels/reduce.h`, `src/program_cache.cpp`
 
 ## Summary
 
@@ -44,7 +44,8 @@ OpenCL 3.0 platform — rusticl (AMD hardware without ROCm support, Intel
 integrated graphics on Mesa, Nouveau) and clvk among them.
 
 Workaround in the meantime: `#define CUSTOM_REDUCE 1` in `reduce.h`
-(`custom_reduce.patch` in https://github.com/mxreyer/pytorch-dlprim-gfx1013).
+(`patches/dlprimitives/00-custom-reduce.patch` in
+https://github.com/mxreyer/pytorch-dlprim-gfx1013).
 Measured cost on the BC-250 workload: none visible; reductions are a few
 percent of a ResNet-9 step.
 

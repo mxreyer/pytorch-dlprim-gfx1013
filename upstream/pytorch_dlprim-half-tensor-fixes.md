@@ -34,7 +34,7 @@ on `ocl:0`:
    `todp()`.** After `y.sum().backward()` the gradient is an expanded tensor;
    `grad_output.contiguous()` first.
 
-Patch: `pytorch_ocl_half_fixes.patch` in
+Patch: `patches/pytorch_dlprim/01-half-fixes.patch` in
 https://github.com/mxreyer/pytorch-dlprim-gfx1013; `tools/half-probe.py` there
 is the per-op inventory and `tools/act-half.py` checks the activations on half
 against CPU. (The matching `dlprimitives` issue: `activation.cl` is built

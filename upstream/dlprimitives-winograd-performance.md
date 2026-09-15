@@ -2,7 +2,7 @@
 
 **Where to file:** https://github.com/artyom-beilis/dlprimitives/issues — as a
 discussion first, then PRs
-**Against:** `ff2d590` (2024-09-04); `src/core/conv.cpp`, `src/kernels/winograd_*.cl`, `src/kernels/bn_sums.cl`
+**Against:** `ff2d590` (2024-09-04; the patch also applies to master `b176c15`); `src/core/conv.cpp`, `src/kernels/winograd_*.cl`, `src/kernels/bn_sums.cl`
 
 ## Summary
 
@@ -11,7 +11,7 @@ Mesa rusticl) found that 89% of a step is convolution and 77% is the three
 Winograd kernels. Five changes to them take the step from 972 img/s (after the
 split-K fix filed separately) to 2,055, with gradients matching CPU references
 over 900 sweeps of the six layer shapes. They are a stacked series of six
-patches, one per item below, in `patches/03`–`08` at
+patches, one per item below, in `patches/dlprimitives/03`–`08` at
 https://github.com/mxreyer/pytorch-dlprim-gfx1013 (`git format-patch` output
 with the commit messages), with the measurements in that repository's
 OPENCL-PERF.md (Findings 3, 10, 11, 12). The per-section numbers below are

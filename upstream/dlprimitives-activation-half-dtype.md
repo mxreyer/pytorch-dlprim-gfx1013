@@ -1,7 +1,7 @@
 # dlprimitives: activation kernels are built without `dtype`, so half tensors are processed as float
 
 **Where to file:** https://github.com/artyom-beilis/dlprimitives/issues
-**Against:** `ff2d590` (2024-09-04); `src/core/activation.cpp`, `src/kernels/activation.cl`
+**Against:** `ff2d590` (2024-09-04; the patch also applies to master `b176c15`); `src/core/activation.cpp`, `src/kernels/activation.cl`
 
 ## Summary
 
@@ -31,7 +31,7 @@ cl::Program const &prog = gpu::Cache::instance().get_program(ctx, "activation",
 with a `DLPRIM_CHECK` that input and output dtypes match. In
 `activation_diff` the `beta` argument is then better taken as `float` and cast
 inside the kernel, since the host passes a float. Patch:
-`patches/01-activation-dtype.patch` in
+`patches/dlprimitives/01-activation-dtype.patch` in
 https://github.com/mxreyer/pytorch-dlprim-gfx1013; `tools/act-half.py` there
 checks each activation on half against CPU.
 

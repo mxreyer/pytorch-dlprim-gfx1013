@@ -17,7 +17,8 @@ when the GPU runs below its voltage floor; see OPENCL-PERF.md, Finding 3.
 
   # after ANY change to the governor's voltage curve: pin the GPU at its
   # minimum frequency first, then run. Expect 0 bad; anything else means the
-  # curve's low end is below what the chip needs (HANDOFF.md, stage 5).
+  # curve's low end is below what the chip needs (HANDOFF.md, "The one thing
+  # to know before debugging a wrong gradient").
   busctl --system call com.cyanskillfish.Governor /com/cyanskillfish/Governor \
       com.cyanskillfish.Governor.PerformanceMode SetRange uu 1000 1000
 

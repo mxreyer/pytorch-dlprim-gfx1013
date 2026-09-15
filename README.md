@@ -6,6 +6,12 @@
 > validated the results on my BC-250. The performance measurements are real
 > and were taken on my board.
 
+Patches and a build script that make
+[pytorch_dlprim](https://github.com/artyom-beilis/pytorch_dlprim) (`pytorch_ocl`,
+the OpenCL backend for PyTorch) work correctly and run fast on the AsRock
+BC-250's gfx1013 GPU under Mesa's rusticl driver — plus the investigation
+that got there.
+
 The `pt_ocl.so` attached to each
 [release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases) of this
 repository is what the notebook image in
@@ -13,12 +19,6 @@ repository is what the notebook image in
 installs, pinned by URL and sha256 in its Dockerfile. To ship a new build: run
 `./build.sh`, tag a release with `pt_ocl.so` attached, then bump the version
 and sha256 there.
-
-Patches and a build script that make
-[pytorch_dlprim](https://github.com/artyom-beilis/pytorch_dlprim) (`pytorch_ocl`,
-the OpenCL backend for PyTorch) work correctly and run fast on the AsRock
-BC-250's gfx1013 GPU under Mesa's rusticl driver — plus the investigation
-that got there.
 
 Images per second in the
 [bc250-jupyterhub-opencl-k3s benchmark](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s/blob/main/benchmark.py)
@@ -42,38 +42,39 @@ ResNet-9 layer shape.
 | [HANDOFF.md](HANDOFF.md) | Where things stand, what is still open, the constraints to keep in mind. (For a future Claude session.) |
 | `tools/` | Microbenchmarks (`ocl-micro.c`, `libclc-probe.c`, `fp16-micro.c`), correctness sweeps (`wino-repro.py`, `bn-check.py`, ...), a Mesa-from-source container (`mesa-dev/`). |
 | `upstream/` | Reports ready to file: three bugs and one proposal for `dlprimitives`, one for `pytorch_dlprim`, two for Mesa/rusticl. |
-| `patches/` | The `dlprimitives` changes as a stacked series, one patch per report. |
+| `patches/` | Everything `build.sh` applies, per target; the `dlprimitives` series is one patch per report. |
 
 ## The patches
 
-Three patches at the top level plus a series in `patches/`, against
-`pytorch_dlprim` and its `dlprimitives` submodule.
+`patches/<target>/NN-*.patch`, applied in numeric order by `build.sh`.
 
-| patch | against | what |
-| --- | --- | --- |
-| `custom_reduce.patch` | dlprimitives | **Correctness.** Use the portable work-group reduction instead of the OpenCL 2.0 built-ins rusticl lacks. Without it softmax, cross-entropy, bias gradients and BatchNorm sums fail to compile. |
-| `patches/01`–`08` | dlprimitives | **Correctness and performance**, one patch per upstream report (table below). |
-| `patches/09-local-knobs.patch` | dlprimitives | The environment variables and the partials-hash diagnostic used for the measurements. Local only. |
-| `pytorch_ocl_half_fixes.patch` | pytorch_dlprim | **Correctness for half tensors.** Reject non-float32 in convolution (it silently returned NaN); dtype-correct hardtanh/relu6/clamp; contiguous grad in `hardtanh_backward`. |
-| `gelu_mad.patch` | pytorch_dlprim | **Performance.** `fma()` → `mad()` in GELU backward. On Mesa < 26.2 rusticl's `fma()` is a 563-instruction software emulation (3.8× on GELU backward). Redundant but harmless on 26.2+. |
+**`patches/dlprimitives/`** — the `dlprimitives` submodule. `00` is the
+rusticl build fix; `01`–`08` are the upstream-ready changes, one per report
+in `upstream/`, stacked in the order they were measured (`git format-patch`
+output with the commit message for the PR; `git apply` and `git am` both
+take them); `09` is local only. img/s is the ResNet-9 training step at batch
+128 with the series applied up to that patch (`tools/profile-step.py 128 20`,
+2026-09-15).
 
-The `dlprimitives` series is stacked in the order the changes were measured,
-so each patch's number is the step it adds. `git format-patch` output, with
-the commit message that would go in the PR; `git apply` and `git am` both
-take them. Measured on 2026-09-15 with `tools/profile-step.py 128 20`,
-ResNet-9 training step at batch 128:
+| patch | what | report in `upstream/` | img/s after |
+| --- | --- | --- | ---: |
+| `00-custom-reduce` | Portable work-group reduction instead of the OpenCL 2.0 built-ins rusticl lacks; without it softmax, cross-entropy, bias gradients and BatchNorm sums fail to compile | custom-reduce-autodetect | — |
+| `01-activation-dtype` | Build the activation kernel with the tensor's dtype; relu/tanh/sigmoid/relu6 on half returned garbage | activation-half-dtype | 915 (stock) |
+| `02-winograd-ksplit-heuristic` | Split-K from work-groups per CU; the old rule left 24 of 40 CUs idle on 128→128 | winograd-ksplit-heuristic | 984 |
+| `03-winograd-no-atomics` | Backward kernels write disjoint planes and a small kernel sums them, instead of emulated fp32 atomics | winograd-performance §1 | 1,477 |
+| `04-winograd-fwd-filter-layout` | Transformed filters stored `[C][N]` so the 32 lanes read contiguously | winograd-performance §2 | 1,634 |
+| `05-winograd-bwd-filter-loads` | Lanes mapped to neighbouring tiles of one plane; vector loads on edge tiles | winograd-performance §2 | 1,815 |
+| `06-bn-sums-grid-stride` | Grid-stride BatchNorm reduction instead of one that hit the same cache sets every step | winograd-performance §2 | 1,949 |
+| `07-winograd-prefetch` | Next K step's tiles loaded into registers before the current GEMM | winograd-performance §3 | 2,068 |
+| `08-winograd-fp16` | Opt-in fp16 LDS tiles and packed-fp16 GEMM, fp32 tensors in memory | winograd-performance §4 | 2,062; 2,886 with `DLPRIM_CONV_FP16=1` |
+| `09-local-knobs` | The environment variables and the partials-hash diagnostic used for the measurements | — | 2,061 |
 
-| patch | report in `upstream/` | img/s after |
-| --- | --- | ---: |
-| `01-activation-dtype` | dlprimitives-activation-half-dtype | 915 (stock) |
-| `02-winograd-ksplit-heuristic` | dlprimitives-winograd-ksplit-heuristic | 984 |
-| `03-winograd-no-atomics` | dlprimitives-winograd-performance §1 | 1,477 |
-| `04-winograd-fwd-filter-layout` | dlprimitives-winograd-performance §2 | 1,634 |
-| `05-winograd-bwd-filter-loads` | dlprimitives-winograd-performance §2 | 1,815 |
-| `06-bn-sums-grid-stride` | dlprimitives-winograd-performance §2 | 1,949 |
-| `07-winograd-prefetch` | dlprimitives-winograd-performance §3 | 2,068 |
-| `08-winograd-fp16` | dlprimitives-winograd-performance §4 | 2,062 off / 2,886 with `DLPRIM_CONV_FP16=1` |
-| `09-local-knobs` | — | 2,061 |
+**`patches/pytorch_dlprim/`** — the extension itself.
+
+| patch | what |
+| --- | --- |
+| `01-half-fixes` | Reject non-float32 in convolution (it silently returned NaN); dtype-correct hardtanh/relu6/clamp; contiguous grad in `hardtanh_backward`. Report: pytorch_dlprim-half-tensor-fixes. |
+| `02-gelu-mad` | `fma()` → `mad()` in GELU backward. On Mesa < 26.2 rusticl's `fma()` is a 563-instruction software emulation (3.8× on GELU backward). Redundant but harmless on 26.2+. |
 
 ### Why the reduction fails to compile
 
@@ -82,35 +83,40 @@ ResNet-9 training step at batch 128:
 (`__opencl_c_work_group_collective_functions` is absent from
 `CL_DEVICE_OPENCL_C_FEATURES`, and no libclc build contains them), so the
 kernels fail with "use of undeclared identifier". `dlprimitives` already has a
-fallback using `__local` memory and `barrier()` behind `CUSTOM_REDUCE`; the
-patch simply turns it on. `tools/libclc-probe.c` checks the feature directly.
+fallback using `__local` memory and `barrier()` behind `CUSTOM_REDUCE`;
+`00-custom-reduce` simply turns it on. `tools/libclc-probe.c` checks the feature directly.
 
-### What the convolution patch does
+### What the convolution patches do
 
 Convolution is 89% of a ResNet-9 training step, and three quarters of that is
-the backward pass, so that is where the work went. In order of discovery:
+the backward pass, so that is where the work went. In the order the series
+applies them:
 
-- **Occupancy.** The split-K heuristic for Winograd backward-filter compared
-  work-items to cores, so a 128→128 layer ran 16 work-groups on 40 CUs. Now
-  it aims for ~4 work-groups per CU. 909 → 972 img/s.
-- **Atomics.** Split-K slices accumulated into the filter gradient with
-  `atomic_addf`, which rusticl expands into a compare-and-swap loop — 39% of
-  the kernel. Each slice now writes its own plane and a small kernel sums
-  them. Same trick for backward-data (four parity planes). 972 → 1,374 img/s.
-- **Access patterns.** Transformed filters stored `[C][N]` so 32 lanes read
-  contiguously; backward-filter lanes mapped to neighbouring tiles of one
-  plane with vector loads on the edges; a grid-stride BatchNorm reduction
-  instead of one that hit the same cache sets every step. 1,374 → 1,816.
-- **Prefetch.** Each Winograd kernel loads the next K step's tiles before the
-  current GEMM. 1,816 → 2,055.
-- **fp16 inner loop (opt-in).** Tiles converted to fp16 on the way into LDS,
-  packed `v_pk_fma_f16` GEMM, fp32 tensors in memory. 2,055 → 2,987, with
-  Y/dX/dW within ~0.5% of fp32 — about 10× looser than NVIDIA's TF32 default,
-  which is why it is not the default.
+- **Occupancy** (`02`). The split-K heuristic for Winograd backward-filter
+  compared work-items to cores, so a 128→128 layer ran 16 work-groups on 40
+  CUs. Now it aims for ~4 work-groups per CU.
+- **Atomics** (`03`). Split-K slices accumulated into the filter gradient with
+  `atomic_addf`, which on a GPU without a hardware fp32 atomic add is a
+  compare-and-swap loop — 39% of the kernel. Each slice now writes its own
+  plane and a small kernel sums them. Same trick for backward-data (four
+  parity planes). Selected when the device is not NVIDIA and lacks
+  `cl_ext_float_atomics`; the atomic path stays for the rest.
+- **Access patterns** (`04`, `05`, `06`). Transformed filters stored `[C][N]`
+  so 32 lanes read contiguously; backward-filter lanes mapped to neighbouring
+  tiles of one plane with vector loads on the edges; a grid-stride BatchNorm
+  reduction instead of one that hit the same cache sets every step.
+- **Prefetch** (`07`). Each Winograd kernel loads the next K step's tiles
+  before the current GEMM.
+- **fp16 inner loop, opt-in** (`08`). Tiles converted to fp16 on the way into
+  LDS, packed `v_pk_fma_f16` GEMM, fp32 tensors in memory. Y/dX/dW within
+  ~0.5% of fp32 — about 10× looser than NVIDIA's TF32 default, which is why
+  it is not the default.
 
 Each step was found by profiling and confirmed by first timing a
 wrong-but-cheap variant; the measurements are in OPENCL-PERF.md, Findings 2,
-3, 10, 11 and 12.
+3, 10, 11 and 12. The benchmark table at the top (real data, 16 epochs) and
+the per-patch table (synthetic step, GPU only) are different measurements
+and differ by a few percent at the same state.
 
 These kernels are dense enough to expose an undervolted clock governor: with
 the GPU's idle floor at 1000 MHz / 718 mV they produced wrong gradients in 66
@@ -120,8 +126,8 @@ suspecting the code (HANDOFF.md has the procedure).
 
 ### Environment variables
 
-`DLPRIM_CONV_FP16` is added by `patches/08`, the rest by
-`patches/09-local-knobs.patch`. An algorithm passed explicitly by the caller
+`DLPRIM_CONV_FP16` is added by `patches/dlprimitives/08`, the rest by `09`.
+An algorithm passed explicitly by the caller
 always wins, so these are inert unless set.
 
 ```
@@ -144,7 +150,8 @@ DLPRIM_CONV_FP16               0 | 1         fp16 LDS tiles + packed-fp16 GEMM, 
 ```
 
 Setting both `*_PLANES` to `0` brings back the original emulated-atomic kernels
-(888 img/s), which is the A/B for the planes paths.
+(1,167 img/s in `tools/profile-step.py` against 2,061), which is the A/B for
+the planes paths.
 
 ## Building
 

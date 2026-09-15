@@ -1,6 +1,6 @@
 # Handoff: where things stand, what is open
 
-As of 2026-09-14. Nothing here is needed to *use* the patches; the shipped
+As of 2026-09-15. Nothing here is needed to *use* the patches; the shipped
 build is correct and verified. The details behind every line are in
 [OPENCL-PERF.md](OPENCL-PERF.md).
 
@@ -20,8 +20,10 @@ img/s in the
 | opt-in `DLPRIM_CONV_FP16=1` | 2,987 | 10,279 | conv within ~0.5% of fp32; 16-epoch accuracy unchanged |
 | T4 (Colab), fp32, for scale | 2,294 | 7,217 | |
 
-Everything is on by default. `DLPRIM_WINOGRAD_BWD_PLANES=0` /
-`_SPLIT_PLANES=0` bring the old emulated-atomic kernels back for comparison.
+Everything is on by default on this device (the planes paths select
+themselves wherever there is no native fp32 atomic add; NVIDIA and
+`cl_ext_float_atomics` devices keep the atomics). `DLPRIM_WINOGRAD_BWD_PLANES=0`
+/ `_SPLIT_PLANES=0` bring the old emulated-atomic kernels back for comparison.
 
 ## The one thing to know before debugging a wrong gradient
 
@@ -63,7 +65,7 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
   rusticl feature gap) or the software `fma()` (a rusticl < 26.2 issue) — both
   patches stay. `tools/libclc-probe.c` checks all three in one run.
 - **Mesa 26.2** (Fedora 45): `fma()` is now the hardware instruction, so
-  `gelu_mad.patch` is redundant; the patches and numbers hold on both 26.1
+  `02-gelu-mad.patch` is redundant; the patches and numbers hold on both 26.1
   and 26.2.
 - **ISA dumps** need `AMD_DEBUG=cs,asm` — both the stage flag and a type flag;
   `cs` alone prints nothing. `tools/one-conv.py` compiles one layer's kernels
@@ -73,6 +75,12 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
   four access-pattern fixes; timing a wrong-but-cheap variant of a stage
   before fixing it turned out to be the fastest way to know what a fix is
   worth.
+- **The patches are a series now** (2026-09-15): `patches/dlprimitives/01`–`08`
+  are one patch per upstream report, each built and swept on its own on the
+  way up (README has the per-patch numbers); `09` holds the measurement env
+  vars. `build.sh` recreates `scratch/` from the patch files, so any work on
+  the kernels should end with `git format-patch` into `patches/`, not with
+  edits left in `scratch/`.
 
 ## Open
 
@@ -81,8 +89,14 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
    and the activation `dtype` bug (small, unambiguous), plus a proposal for
    the atomics-free paths / access patterns / prefetch that needs the
    author's numbers on NVIDIA and Intel; for `pytorch_dlprim` the half-tensor
-   fixes; for Mesa the two rusticl device-info misreports. The patches still
-   apply to upstream HEAD.
+   fixes; for Mesa the two rusticl device-info misreports (hardcoded in
+   `rusticl/api/device.rs`, not a radeonsi problem). Checked 2026-09-15:
+   nothing related is filed anywhere, and the `dlprimitives` series applies
+   cleanly to upstream HEAD (`b176c15`). Two things about the `dlprimitives`
+   maintainer worth knowing: PR #42, AI-generated, was closed after a "who
+   wrote this?", and rusticl has been called "a very buggy driver" there
+   (pytorch_dlprim #97) — hence the disclosure at the end of each report, and the
+   CUSTOM_REDUCE report leading with the OpenCL 3.0 spec rather than rusticl.
 2. **A full fp16 tensor path.** Packed `v_pk_fma_f16` reaches 18.7 TFLOP/s
    through rusticl (`tools/fp16-micro.c`), so the hardware is not the
    obstacle. Today only pointwise ops accept half tensors; matmul, pooling,

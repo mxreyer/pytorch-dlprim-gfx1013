@@ -3,8 +3,8 @@
 //   gcc -O2 -o libclc-probe tools/libclc-probe.c -lOpenCL
 //   RUSTICL_ENABLE=radeonsi ./libclc-probe
 //
-// Answers, in one run, the questions HANDOFF.md stage 3 asked (and settled
-// with this probe: warning gone with the fork, no collectives with either
+// Answers, in one run, the libclc questions (HANDOFF.md, "Done, for the
+// record"; settled with this probe: warning gone with the fork, no collectives with either
 // libclc, fma() hardware from Mesa 26.2 on regardless of libclc):
 //
 //   1. Is the "Patched Mesa libclc" present?  (rusticl prints its warning to

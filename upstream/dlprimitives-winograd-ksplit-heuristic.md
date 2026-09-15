@@ -1,7 +1,7 @@
 # dlprimitives: Winograd backward-filter split-K heuristic compares work-items to cores
 
 **Where to file:** https://github.com/artyom-beilis/dlprimitives/issues
-**Against:** `ff2d590` (2024-09-04); `src/core/conv.cpp`, `Conv2DBackwardFilterWinograd`
+**Against:** `ff2d590` (2024-09-04; the patch also applies to master `b176c15`); `src/core/conv.cpp`, `Conv2DBackwardFilterWinograd`
 
 ## Summary
 
@@ -33,20 +33,29 @@ gradients unchanged to 1e-5 relative.
 
 ## Suggested fix
 
-Compare work-groups to compute units and aim for a few work-groups per CU,
-capped by the K available:
+Compare work-groups to compute units, aim for a few work-groups per CU, and
+never split a slice below 16 K items:
 
 ```cpp
-int wg = ((C_in + 31) / 32) * ((C_out + 31) / 32);
-int cu = device.getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>();
-int target = cu * 4;                       // ~4 work-groups per CU
-k_split_ = wg >= target ? 1 : min(round_up(target, wg), k_available, 16);
+int wg_count = ((config_.channels_in + 31) / 32)
+             * ((config_.channels_out + 31) / 32);
+int cu = ctx.device().getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>();
+int target = cu * 4;
+k_split_ = 1;
+while(k_split_ < 16 && wg_count * k_split_ < target)
+    k_split_ *= 2;
+int k_work = config.shape[0] * ((h + 1) / 2) * ((w + 1) / 2);
+while(k_split_ > 1 && k_work / k_split_ < 16)
+    k_split_ /= 2;
+reduce_k_ = k_split_ > 1;
 ```
 
-Targets of 8, 16 and 32 per CU measured the same as 4 on this device, so the
-constant is not sensitive. Patch: `patches/02-winograd-ksplit-heuristic.patch`
-in https://github.com/mxreyer/pytorch-dlprim-gfx1013; the full measurements
-are in that repository's OPENCL-PERF.md, Finding 2.
+with the launch's z-dimension set to `k_split_` instead of the fixed 8 (the
+kernel already derives its slice from `get_global_size(2)`). Targets of 8, 16
+and 32 per CU measured the same as 4 on this device, so the constant is not
+sensitive. Patch: `patches/dlprimitives/02-winograd-ksplit-heuristic.patch` in
+https://github.com/mxreyer/pytorch-dlprim-gfx1013; the full measurements are
+in that repository's OPENCL-PERF.md, Finding 2.
 
 ## Disclosure
 

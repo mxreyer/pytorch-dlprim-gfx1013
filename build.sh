@@ -50,19 +50,13 @@ if [[ "$got" != "$DLPRIMITIVES_COMMIT" ]]; then
 fi
 
 echo "== applying patches =="
-# Correctness: rusticl has no work_group_reduce_* (a driver feature gap).
-git -C "$SCRATCH/src/dlprimitives" apply "$HERE/custom_reduce.patch"
-# The dlprimitives series (patches/01..08 are the upstream-ready pieces, one
-# per report in upstream/; 09 is the local measurement knobs). Order matters.
-for p in "$HERE"/patches/0[1-9]-*.patch; do
+# patches/<target>/NN-*.patch, in numeric order; README.md lists what each does.
+for p in "$HERE"/patches/dlprimitives/[0-9][0-9]-*.patch; do
     git -C "$SCRATCH/src/dlprimitives" apply "$p"
 done
-# Performance: OpenCL fma() is a software emulation on rusticl before Mesa
-# 26.2; use mad(). Redundant but harmless on 26.2.
-git -C "$SCRATCH/src"              apply "$HERE/gelu_mad.patch"
-# Half-tensor fixes: reject non-float32 in convolution (came back as NaN),
-# dtype-correct hardtanh/relu6/clamp formulas, contiguous grad in hardtanh_backward.
-git -C "$SCRATCH/src"              apply "$HERE/pytorch_ocl_half_fixes.patch"
+for p in "$HERE"/patches/pytorch_dlprim/[0-9][0-9]-*.patch; do
+    git -C "$SCRATCH/src" apply "$p"
+done
 
 echo "== configuring =="
 # -ffile-prefix-map: __FILE__ (TORCH_CHECK messages, torch's inline asserts)

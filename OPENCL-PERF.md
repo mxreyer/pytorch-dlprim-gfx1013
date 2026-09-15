@@ -38,15 +38,15 @@ looks like it is.
 
 | # | Finding | Where | Status |
 | - | --- | --- | --- |
-| 1 | `fma()` compiles to a **563-instruction software emulation**, 120× slower than `mad()` | rusticl < 26.2 (never tells libclc the device has hardware fma) | fixed in our kernels (`gelu_mad.patch`); native on Mesa 26.2 |
-| 2 | Winograd backward-filter launches **16 work-groups onto 40 CUs** | dlprimitives heuristic | fixed (`patches/02-winograd-ksplit-heuristic.patch`) |
+| 1 | `fma()` compiles to a **563-instruction software emulation**, 120× slower than `mad()` | rusticl < 26.2 (never tells libclc the device has hardware fma) | fixed in our kernels (`02-gelu-mad.patch`); native on Mesa 26.2 |
+| 2 | Winograd backward-filter launches **16 work-groups onto 40 CUs** | dlprimitives heuristic | fixed (`patches/dlprimitives/02-winograd-ksplit-heuristic.patch`) |
 | 3 | Both backward kernels run on **emulated float atomics** — a third of the training step. Removing them is worth **+46%**. The "ACO `s_waitcnt` bug" that kept the fix gated for two weeks was the **clock governor's idle-floor undervolt** (1000 MHz @ 718 mV) | half silicon, half `dlprimitives`, then a config file | **fixed and shipping**: 1,374 img/s, no driver flags; voltage restored to the governor default |
 | 4 | rusticl **misreports** LDS and cache as absent | rusticl device info | reports drafted in `upstream/`; no impact on this stack |
 | 5 | Throttling / launch overhead / memory bandwidth / wrong conv algorithm | — | **all ruled out** |
 | 6 | The remaining gap is **the backward passes**, running at half the forward pass's efficiency; a T4 reaches 64% of its paper number where this reached 21.6% at the time (45.7% now) | `dlprimitives` kernels | measured (this corrects an earlier wrong conclusion) |
 | 7 | Wave size is per-kernel, and rusticl picks one globally: `AMD_DEBUG=w32cs` is **+13% on GEMM, −5% on this conv workload** | rusticl / radeonsi | measured; matters for matmul-heavy work |
 | 8 | Fedora's libclc **cannot link `sin()`, `cos()`, `tan()`, `fma()`, `remquo()`** — `torch.randn(device="ocl:0")` fails to compile | Fedora `libclc-spirv` 22.1.8 (F44 and F45) | **fixed**: Mesa's patched libclc as a drop-in (also removes the start-up warning) |
-| 9 | Image moved to **Fedora 45 / Mesa 26.2.2**: `fma()` native, everything correct, training within noise of 44 | Fedora 45 | shipping (Finding 3, *On Mesa 26.2…*; Finding 8; HANDOFF.md, stage 4) |
+| 9 | Image moved to **Fedora 45 / Mesa 26.2.2**: `fma()` native, everything correct, training within noise of 44 | Fedora 45 | shipping (Finding 3, *On Mesa 26.2…*; Finding 8; HANDOFF.md, *Done, for the record*) |
 | 10 | With the profile finally honest, four **memory access patterns**: a strided transformed-kernel read in forward Winograd (39% of that kernel), lane-to-channel mapping and scalar edge loads in backward-filter, and a BatchNorm reduction that hit the same cache sets every step (13 GB/s) | `dlprimitives` kernels | **fixed and shipping**: 1,460 → **1,963 img/s** in the isolated step; **1,816** over 16 epochs, inference **4,433 → 6,418** |
 | 11 | **fp16 inner loop for the Winograd kernels** (`DLPRIM_CONV_FP16=1`, opt-in): packed `v_pk_fma_f16` runs at 91% of the 2× fp16 peak through rusticl; fp32 tensors in and out, fp16 LDS tiles and accumulation over one K slice | `dlprimitives` kernels | **shipping, opt-in**: 2,714 img/s training (acc 0.928), **9,584 inference** — both past the T4's fp32 numbers; Y/dX/dW within ~0.5% of fp32 |
 | 12 | **Software pipelining**: prefetching the next K step's tiles into registers before the GEMM | `dlprimitives` kernels | **shipping**: 2,055 img/s / 7,064 inference at fp32 (T4: 2,294 / 7,217); 2,987 / 10,279 in fp16 mode. LDS double-buffering and fp32-accumulate mixed precision measured and rejected |
@@ -115,7 +115,7 @@ issue, not a libclc packaging one, and swapping in Mesa's patched libclc does
 not change it — measured under both, `fma()` stays 15–18× slower than `mad()`
 (`tools/libclc-probe.c`). Confirmed on Fedora 45 / Mesa 26.2.2: the same probe
 reports `fma()` at 1.0× `mad()` — 893 vs 894 GFLOP/s — with either libclc.
-`gelu_mad.patch` is redundant there (and harmless). (An earlier version of this section tied it to the *"Patched Mesa
+`02-gelu-mad.patch` is redundant there (and harmless). (An earlier version of this section tied it to the *"Patched Mesa
 libclc not detected"* warning; see Finding 8 for what that warning actually
 covers.)
 
@@ -129,7 +129,7 @@ covers.)
 | `gelu(approximate="none")` backward, 8M elements | 1.80 ms | **1.10 ms** |
 | `tanh` backward (reference, no `fma`) | 0.77 ms | 0.77 ms |
 
-`gelu_mad.patch` swaps the five `fma()`
+`02-gelu-mad.patch` swaps the five `fma()`
 calls for `mad()`, and GELU backward drops to the speed of any other
 memory-bound elementwise op, where it belongs. Gradients still match CPU to
 1.2e-7 relative.
@@ -161,7 +161,7 @@ kernel**.
 The image size never enters the formula at all, so the amount of reduction work
 available to split is not considered either.
 
-`patches/02-winograd-ksplit-heuristic.patch` picks the
+`patches/dlprimitives/02-winograd-ksplit-heuristic.patch` picks the
 split from how many work-groups the launch actually has versus how many CUs
 there are to fill (aiming for ~4 work-groups per CU), and refuses to split
 further than there is K work to divide. Per-call, averaged over 10 steps:
@@ -202,8 +202,8 @@ within run-to-run variance. Inference is untouched, as expected — there is no
 backward-filter kernel in an inference pass. Gradients match CPU to better than
 1e-5 relative for every ResNet-9 layer shape.
 
-The patch also adds environment variables to make these choices measurable
-instead of assumed — `DLPRIM_CONV_ALGO`, `DLPRIM_CONV_FWD_ALGO`,
+`09-local-knobs.patch` adds environment variables to make these choices
+measurable instead of assumed — `DLPRIM_CONV_ALGO`, `DLPRIM_CONV_FWD_ALGO`,
 `DLPRIM_CONV_BWD_DATA_ALGO`, `DLPRIM_CONV_BWD_FILTER_ALGO`
 (`auto`|`winograd`|`gemm`|`depthwise_separable`) and `DLPRIM_WINOGRAD_KSPLIT`
 (`stock`|*n*).
@@ -253,7 +253,7 @@ denominators match:
 | | GPU time per step |
 | --- | ---: |
 | stock | 137.75 ms |
-| with `patches/02-winograd-ksplit-heuristic.patch` | 128.32 ms |
+| with `patches/dlprimitives/02-winograd-ksplit-heuristic.patch` | 128.32 ms |
 | …and atomics removed (speed-of-light, incorrect results) | **106.32 ms** |
 
 The atomics cost **22.0 ms, or 17% of GPU time per step**. Strip them and
@@ -611,7 +611,9 @@ And the performance, with `force-waitcnt` gone for good:
 
 **+46% training, inference unchanged** — the number this whole finding said
 was locked behind an upstream compiler fix. The interlock is gone from
-`patches/03-winograd-no-atomics.patch`; the atomics-free paths are on by default with
+`patches/dlprimitives/03-winograd-no-atomics.patch`; the atomics-free paths are
+selected wherever the device has no native fp32 atomic add (not NVIDIA, no
+`cl_ext_float_atomics` — so on every device this repository targets), with
 `DLPRIM_WINOGRAD_BWD_PLANES=0` / `DLPRIM_WINOGRAD_SPLIT_PLANES=0` as the way
 back to the atomic kernels for comparison. The upstream report in `upstream/`
 is withdrawn before filing.
@@ -997,7 +999,7 @@ contain known bugs or breaking changes and isn't guaranteed to work reliably.
 Please visit https://gitlab.freedesktop.org/karolherbst/mesa-libclc ... ===
 ```
 
-The hope (HANDOFF.md, stage 3) was that the fork would make two of our three
+The hope (HANDOFF.md, *Done, for the record*) was that the fork would make two of our three
 patches unnecessary. It makes neither unnecessary — but the reason it exists
 turned out to be sitting in the stock Fedora container.
 
@@ -1076,7 +1078,7 @@ epoch-1 accuracy 0.824 vs 0.821).
   26.2's `rusticl_insert_libclc_config`, not libclc.
 - `work_group_reduce_*` is still undeclared. rusticl does not advertise
   `__opencl_c_work_group_collective_functions`, and no libclc — upstream or
-  fork — implements those builtins. `custom_reduce.patch` stays.
+  fork — implements those builtins. `00-custom-reduce.patch` stays.
 
 ## Finding 10 — four access patterns, +34%, one afternoon
 
@@ -1194,9 +1196,10 @@ heavy kernel is fp32-only: matmul, linear, pooling, softmax, the loss and
 BatchNorm refuse a half tensor; convolution *accepted* one and returned NaN
 (now a `TORCH_CHECK`); `relu`/`tanh`/`sigmoid`/`relu6` on half returned wrong
 values because `activation.cl` was built without its `dtype` define and read
-the halves as floats (fixed, together with `hardtanh`'s float-vs-half formula
-and a non-contiguous gradient in `hardtanh_backward` — all in
-`pytorch_ocl_half_fixes.patch`, checked by `tools/act-half.py`); bfloat16 and
+the halves as floats (fixed in `patches/dlprimitives/01-activation-dtype.patch`;
+`hardtanh`'s float-vs-half formula and a non-contiguous gradient in
+`hardtanh_backward` in `patches/pytorch_dlprim/01-half-fixes.patch`; checked by
+`tools/act-half.py`); bfloat16 and
 `torch.autocast("ocl")` are unsupported. `tools/half-probe.py`
 is the inventory. A full fp16 tensor path is a port of every one of those —
 weeks.
@@ -1376,7 +1379,7 @@ constraints and dead ends a fresh start would otherwise rediscover.
   feature gap that no libclc fills. What it does fix is worse than either:
   `torch.randn` on the device.
 - **Mesa 26.2.** Done: everything is verified on Fedora 45 / Mesa 26.2.2. `fma()` is native
-  (`gelu_mad.patch` redundant but harmless).
+  (`02-gelu-mad.patch` redundant but harmless).
 - **The governor's voltage curve.** The one thing on this box that can make
   correct code produce wrong numbers, and it lives outside this repository
   (`/etc/cyan-skillfish-governor-smu/config.toml`). Any future retune must be
