@@ -3,8 +3,8 @@
 > **Note:** the patches, tools and documentation in this repository were
 > heavily authored by Claude ([Claude Code](https://claude.com/claude-code),
 > Claude Opus 5). I steered the direction of the investigation and
-> validated the results on my board. The performance measurements are real
-> and were taken on my hardware.
+> validated the results on my BC-250. The performance measurements are real
+> and were taken on my board.
 
 The `pt_ocl.so` attached to each
 [release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases) of this
