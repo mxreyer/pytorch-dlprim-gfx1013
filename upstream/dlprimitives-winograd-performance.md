@@ -13,12 +13,11 @@ split-K fix filed separately) to 2,055, with gradients matching CPU references
 over 900 sweeps of the six layer shapes. They are a stacked series of six
 patches, one per item below, in `patches/dlprimitives/03`–`08` at
 https://github.com/mxreyer/pytorch-dlprim-gfx1013 (`git format-patch` output
-with the commit messages), with the measurements in that repository's
-OPENCL-PERF.md (Findings 3, 10, 11, 12). The per-section numbers below are
-from the investigation, in the order the changes were found; re-measured
-patch by patch on the stacked series the steps are 984 → 1,477 → 1,634 →
-1,815 → 1,949 → 2,068 img/s (README there). I would like to know which of
-these you want as PRs and how you would prefer them gated.
+with the commit messages). The per-section numbers below are from the
+investigation, in the order the changes were found; re-measured patch by
+patch on the stacked series the steps are 984 → 1,477 → 1,634 → 1,815 →
+1,949 → 2,068 img/s (the README there has the table). I would like to know
+which of these you want as PRs and how you would prefer them gated.
 
 ## 1. Backward kernels without `atomic_addf` (972 → 1,374 img/s) — `03-winograd-no-atomics`
 
