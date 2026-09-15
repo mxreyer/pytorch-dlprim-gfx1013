@@ -76,9 +76,13 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
 
 ## Open
 
-1. **Send the `dlprimitives` changes upstream** — occupancy fix, split-K
-   planes, parity planes, the access-pattern fixes. All correct and on by
-   default now; the patch still applies to upstream HEAD.
+1. **File the `upstream/` reports.** Drafted, not yet filed: for
+   `dlprimitives` the `CUSTOM_REDUCE` auto-detection, the split-K heuristic
+   and the activation `dtype` bug (small, unambiguous), plus a proposal for
+   the atomics-free paths / access patterns / prefetch that needs the
+   author's numbers on NVIDIA and Intel; for `pytorch_dlprim` the half-tensor
+   fixes; for Mesa the two rusticl device-info misreports. The patches still
+   apply to upstream HEAD.
 2. **A full fp16 tensor path.** Packed `v_pk_fma_f16` reaches 18.7 TFLOP/s
    through rusticl (`tools/fp16-micro.c`), so the hardware is not the
    obstacle. Today only pointwise ops accept half tensors; matmul, pooling,
