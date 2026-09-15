@@ -1,0 +1,149 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mxreyer <236478497+mxreyer@users.noreply.github.com>
+Date: Tue, 15 Sep 2026 11:18:54 -0700
+Subject: [PATCH] winograd_bwd_filter: coalesce the tile loads
+
+Two changes to how winconv_3x3_bwd_filter reads its inputs:
+
+- Lane mapping. Lanes were assigned channel-fastest, so the 32 lanes of a
+  wave each read a tile from a different channel plane, IMG_H*IMG_W floats
+  apart, and nothing coalesced. Assign k (batch x tile) fastest instead so
+  neighbouring lanes read neighbouring tiles of the same plane.
+
+- Edge tiles. A 4x4 input tile with its one-element halo took the scalar
+  path whenever it touched the left or right edge - every tile of a 4x4 or
+  8x8 layer. Load each row as one vload4 (bounds-checked against the whole
+  buffer, so it may straddle a neighbouring row but never leave the
+  allocation) and mask the out-of-image columns; the 2x2 dy tile becomes
+  one vload2 per row.
+
+Backward-filter Winograd 27.0 -> 19.4 ms per ResNet-9 training step on an
+AMD gfx1013.
+---
+ src/kernels/winograd_bwd_filter.cl | 72 ++++++++++++++++++------------
+ 1 file changed, 43 insertions(+), 29 deletions(-)
+
+diff --git a/src/kernels/winograd_bwd_filter.cl b/src/kernels/winograd_bwd_filter.cl
+index 94c4eb3..01c0e92 100644
+--- a/src/kernels/winograd_bwd_filter.cl
++++ b/src/kernels/winograd_bwd_filter.cl
+@@ -100,49 +100,56 @@ float16 transform_tile(float4 a[4])
+ }
+ 
+ 
+-float16 load_4x4_tile_and_transform(__global const float * restrict img,int r,int c)
++// img points at (r,c) of the plane, which may be outside the image (the
++// tile has a one-element halo). base/end bound the whole buffer. Rows out of
++// the image are zero; columns are loaded as one vload4 and masked, so a tile
++// on the left/right edge (every tile of a 4x4 or 8x8 layer) costs the same
++// as an interior one. The vload4 may straddle into a neighbouring row of the
++// same buffer - harmless, those lanes are masked - but not outside the buffer.
++float16 load_4x4_tile_and_transform(__global const float * restrict img,int r,int c,
++                                    __global const float * restrict base,
++                                    __global const float * restrict end)
+ {
+     float4 vals[4];
++    int4 colmask;
++    colmask.s0 = (c+0 >= 0 && c+0 < IMG_W) ? -1 : 0;
++    colmask.s1 = (c+1 >= 0 && c+1 < IMG_W) ? -1 : 0;
++    colmask.s2 = (c+2 >= 0 && c+2 < IMG_W) ? -1 : 0;
++    colmask.s3 = (c+3 >= 0 && c+3 < IMG_W) ? -1 : 0;
+     #pragma unroll
+     for(int dr=0;dr<4;dr++,img+=IMG_W) {
+-        if(r+dr >= 0 && r+dr < IMG_H) { 
+-            if(c>= 0 && c + 3 < IMG_W)
+-                vals[dr] = vload4(0,img);
++        if(r+dr >= 0 && r+dr < IMG_H) {
++            float4 v;
++            if(img >= base && img + 4 <= end)
++                v = vload4(0,img);
+             else {
+-                vals[dr].s0 = (c+0 >= 0 && c+0 < IMG_W) ? img[0] : 0;
+-                vals[dr].s1 = (c+1 >= 0 && c+1 < IMG_W) ? img[1] : 0;
+-                vals[dr].s2 = (c+2 >= 0 && c+2 < IMG_W) ? img[2] : 0;
+-                vals[dr].s3 = (c+3 >= 0 && c+3 < IMG_W) ? img[3] : 0;
++                v.s0 = (c+0 >= 0 && c+0 < IMG_W) ? img[0] : 0;
++                v.s1 = (c+1 >= 0 && c+1 < IMG_W) ? img[1] : 0;
++                v.s2 = (c+2 >= 0 && c+2 < IMG_W) ? img[2] : 0;
++                v.s3 = (c+3 >= 0 && c+3 < IMG_W) ? img[3] : 0;
+             }
++            vals[dr] = as_float4(as_int4(v) & colmask);
+         }
+         else {
+             vals[dr] = 0;
+         }
+     }
+ 
+-    
+-
+     return transform_tile(vals);
+ }
+ 
+ 
+ float16 load_2x2_tile_and_transform(__global const float * restrict img,int r,int c)
+ {
+-    float4 v;
+-    if(r < IMG_H) {
+-        v.s0 = c+0 < IMG_W ? img[0] : 0.0;
+-        v.s1 = c+1 < IMG_W ? img[1] : 0.0;
+-    }
+-    else {
+-        v.lo = 0;
+-    }
++    // c is even and >= 0; the pair is one vload2 unless it crosses the right
++    // edge (odd IMG_W only).
++    float4 v = 0;
++    bool pair = c + 1 < IMG_W;
++    if(r < IMG_H)
++        v.lo = pair ? vload2(0,img) : (float2)(c < IMG_W ? img[0] : 0.0f, 0.0f);
+     if(r + 1 < IMG_H) {
+         img += IMG_W;
+-        v.s2 = c+0 < IMG_W ? img[0] : 0.0;
+-        v.s3 = c+1 < IMG_W ? img[1] : 0.0;
+-    }
+-    else {
+-        v.hi = 0;
++        v.hi = pair ? vload2(0,img) : (float2)(c < IMG_W ? img[0] : 0.0f, 0.0f);
+     }
+ 
+     return tile2x2_to_4x4(v);
+@@ -262,11 +269,16 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+ 
+ 
+     // Loading data
+-    int l_xtile_c = get_local_id(WG_DIM) % XTILES_IN_WG;
+-    int l_xtile_k = get_local_id(WG_DIM) / XTILES_IN_WG;
+-
+-    int l_ytile_n = get_local_id(WG_DIM) % YTILES_IN_WG;
+-    int l_ytile_k = get_local_id(WG_DIM) / YTILES_IN_WG;
++    // Lane -> (channel, k) mapping for the loads. k (batch x tile) varies
++    // fastest across lanes so that neighbouring lanes read neighbouring tiles
++    // of the SAME channel plane, which are adjacent in memory. With channel
++    // varying fastest every lane reads from a different plane, a stride of
++    // IMG_H*IMG_W floats, and nothing coalesces.
++    int l_xtile_k = get_local_id(WG_DIM) % WG_K;
++    int l_xtile_c = get_local_id(WG_DIM) / WG_K;
++
++    int l_ytile_k = get_local_id(WG_DIM) % WG_K;
++    int l_ytile_n = get_local_id(WG_DIM) / WG_K;
+    
+     int wg_ch_in  = get_group_id(0) * XTILES_IN_WG;
+     int wg_ch_out = get_global_id(1) * YTILES_IN_WG; 
+@@ -295,6 +307,8 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+         reduce_k = true;
+     }
+     
++    __global float const *image_base = image;
++    __global float const *image_end  = image + (size_t)B * C * IMG_H * IMG_W;
+     image  += (wg_ch_in  + l_xtile_c) * (IMG_H * IMG_W);
+     result += (wg_ch_out + l_ytile_n) * (IMG_H * IMG_W);
+ 
+@@ -308,7 +322,7 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+             int col    = rowcol % half_W * 2;
+             __global float const *x = image + batch * C * IMG_H * IMG_W + (row - 1) * IMG_W + (col - 1);
+             // load relevant tile       
+-            float16 my_xtile = (k + l_xtile_k < K_limit && l_xtile_c + wg_ch_in < C) ? load_4x4_tile_and_transform(x,row-1,col-1) : 0; 
++            float16 my_xtile = (k + l_xtile_k < K_limit && l_xtile_c + wg_ch_in < C) ? load_4x4_tile_and_transform(x,row-1,col-1,image_base,image_end) : 0;
+             store_local(l_xtile_ptr,l_xtile_stride,my_xtile);
+         }
+         {

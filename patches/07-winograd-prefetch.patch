@@ -1,0 +1,313 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mxreyer <236478497+mxreyer@users.noreply.github.com>
+Date: Tue, 15 Sep 2026 11:21:20 -0700
+Subject: [PATCH] winograd: prefetch the next K step's tiles into registers
+ before the GEMM
+
+All three Winograd kernels loaded a K step's tiles from global memory,
+transformed them, stored them to LDS and then ran the GEMM, so the memory
+latency serialised with the arithmetic. Issue the raw (masked) loads for
+step k+WG_K before step k's GEMM and transform/store them after it. The
+load helpers return the untransformed tile for that; the transforms are
+unchanged.
+
+ResNet-9 training step 65.0 -> 59.8 ms on an AMD gfx1013. LDS
+double-buffering was measured as well and lost to occupancy.
+---
+ src/kernels/winograd_bwd_data.cl   | 39 ++++++++++++----
+ src/kernels/winograd_bwd_filter.cl | 74 +++++++++++++++++-------------
+ src/kernels/winograd_fwd.cl        | 40 ++++++++++++----
+ 3 files changed, 103 insertions(+), 50 deletions(-)
+
+diff --git a/src/kernels/winograd_bwd_data.cl b/src/kernels/winograd_bwd_data.cl
+index ad7a122..2685fbb 100644
+--- a/src/kernels/winograd_bwd_data.cl
++++ b/src/kernels/winograd_bwd_data.cl
+@@ -128,7 +128,9 @@ float16 tile2x2_to_4x4(float4 v)
+ }
+ 
+ 
+-float16 load_2x2_tile_and_transform(__global const float * restrict frame,int pos,int limit,int end,int stride,int2 mask[2])
++// Raw (masked) 2x2 tile load; transformed later so the loads for the next K
++// step can be in flight during this step's GEMM.
++float4 load_2x2_tile_raw(__global const float * restrict frame,int pos,int limit,int end,int stride,int2 mask[2])
+ {
+     float2 a[2];
+     frame += pos;
+@@ -152,7 +154,7 @@ float16 load_2x2_tile_and_transform(__global const float * restrict frame,int po
+             }
+         }
+     }
+-    return tile2x2_to_4x4((float4)(a[0],a[1]));
++    return (float4)(a[0],a[1]);
+ }
+ 
+ 
+@@ -194,6 +196,7 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+         l_val[15*strd] = v.sf;
+ }
+ 
++
+ #define WG_SIZE 256
+ #define TILES_IN_WG 32
+ #define KERNELS_IN_WG 32
+@@ -308,19 +311,35 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+ 
+     // store
+ 
++    // Software pipelining: global loads for step k+1 are issued before step
++    // k's GEMM and consumed after it (see winograd_fwd.cl).
++    float4 raw_tile = 0;
++    float16 raw_kern = 0;
++    bool tile_ok = l_b < B && l_tile_k < N;
++    bool kern_ok = l_channel < C && l_kern_k < N;
++    if(tile_ok)
++        raw_tile = load_2x2_tile_raw(result,result_pos,result_limit,result_end,W,load_mask);
++    if(kern_ok)
++        raw_kern = kernels[l_kern_k * C + l_channel];
++
+     for(int k=0;k < N;k+=WG_K,result_pos += WG_K*W*H)
+     {
+-
+-        // load relevant tile       
+-        float16 my_tile = (l_b < B && k + l_tile_k < N) ? load_2x2_tile_and_transform(result,result_pos,result_limit,result_end,W,load_mask) : 0; 
++        float16 my_tile = tile_ok ? tile2x2_to_4x4(raw_tile) : 0;
+         store_local(l_tile_ptr,l_tile_stride,my_tile);
+-        
+-        // load relevant kernel
+-        float16 my_kern = (l_channel < C && k+l_kern_k < N) ? kernels[(l_kern_k + k) * C + l_channel] : 0;
+-        store_local(l_kern_ptr,l_kern_stride,my_kern);
++        store_local(l_kern_ptr,l_kern_stride,kern_ok ? raw_kern : (float16)0);
+ 
+         barrier(CLK_LOCAL_MEM_FENCE);
+ 
++        {
++            int kn = k + WG_K;
++            tile_ok = l_b < B && kn + l_tile_k < N;
++            kern_ok = l_channel < C && kn + l_kern_k < N;
++            if(tile_ok)
++                raw_tile = load_2x2_tile_raw(result,result_pos + WG_K*W*H,result_limit,result_end,W,load_mask);
++            if(kern_ok)
++                raw_kern = kernels[(kn + l_kern_k) * C + l_channel];
++        }
++
+         // GEMM
+         #pragma unroll
+         for(int dk=0;dk<WG_K;dk++) {
+@@ -428,6 +447,8 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+ }
+ 
+ 
++
++
+ // Sum the four parity planes written above into the real input gradient.
+ // dst = beta*dst + sum_{p=0..3} src[p]
+ // A pixel is covered by two tiles along each axis (rows 2t-1..2t+2 overlap
+diff --git a/src/kernels/winograd_bwd_filter.cl b/src/kernels/winograd_bwd_filter.cl
+index 01c0e92..7a0978f 100644
+--- a/src/kernels/winograd_bwd_filter.cl
++++ b/src/kernels/winograd_bwd_filter.cl
+@@ -106,11 +106,10 @@ float16 transform_tile(float4 a[4])
+ // on the left/right edge (every tile of a 4x4 or 8x8 layer) costs the same
+ // as an interior one. The vload4 may straddle into a neighbouring row of the
+ // same buffer - harmless, those lanes are masked - but not outside the buffer.
+-float16 load_4x4_tile_and_transform(__global const float * restrict img,int r,int c,
+-                                    __global const float * restrict base,
+-                                    __global const float * restrict end)
++void load_4x4_tile_raw(float4 vals[4],__global const float * restrict img,int r,int c,
++                       __global const float * restrict base,
++                       __global const float * restrict end)
+ {
+-    float4 vals[4];
+     int4 colmask;
+     colmask.s0 = (c+0 >= 0 && c+0 < IMG_W) ? -1 : 0;
+     colmask.s1 = (c+1 >= 0 && c+1 < IMG_W) ? -1 : 0;
+@@ -134,12 +133,10 @@ float16 load_4x4_tile_and_transform(__global const float * restrict img,int r,in
+             vals[dr] = 0;
+         }
+     }
+-
+-    return transform_tile(vals);
+ }
+ 
+ 
+-float16 load_2x2_tile_and_transform(__global const float * restrict img,int r,int c)
++float4 load_2x2_tile_raw(__global const float * restrict img,int r,int c)
+ {
+     // c is even and >= 0; the pair is one vload2 unless it crosses the right
+     // edge (odd IMG_W only).
+@@ -151,8 +148,7 @@ float16 load_2x2_tile_and_transform(__global const float * restrict img,int r,in
+         img += IMG_W;
+         v.hi = pair ? vload2(0,img) : (float2)(c < IMG_W ? img[0] : 0.0f, 0.0f);
+     }
+-
+-    return tile2x2_to_4x4(v);
++    return v;
+ }
+ 
+ 
+@@ -206,6 +202,7 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+         l_val[15*strd] = v.sf;
+ }
+ 
++
+ #define WG_SIZE 256
+ #define XTILES_IN_WG 32
+ #define YTILES_IN_WG 32
+@@ -312,33 +309,46 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+     image  += (wg_ch_in  + l_xtile_c) * (IMG_H * IMG_W);
+     result += (wg_ch_out + l_ytile_n) * (IMG_H * IMG_W);
+ 
++    // Software pipelining: the global loads for step k+WG_K are issued before
++    // this step's GEMM and consumed after it (see winograd_fwd.cl).
++    float4 raw_x[4] = {0,0,0,0};
++    float4 raw_y = 0;
++    bool x_ok = false, y_ok = false;
++    #define PREFETCH(kk) \
++        { \
++            int my_k = (kk) + l_xtile_k; \
++            x_ok = my_k < K_limit && l_xtile_c + wg_ch_in < C; \
++            if(x_ok) { \
++                int batch  = my_k / half_WG; \
++                int rowcol = my_k % half_WG; \
++                int row    = rowcol / half_W * 2; \
++                int col    = rowcol % half_W * 2; \
++                __global float const *x = image + batch * C * IMG_H * IMG_W + (row - 1) * IMG_W + (col - 1); \
++                load_4x4_tile_raw(raw_x,x,row-1,col-1,image_base,image_end); \
++            } \
++            my_k = (kk) + l_ytile_k; \
++            y_ok = my_k < K_limit && l_ytile_n + wg_ch_out < N; \
++            if(y_ok) { \
++                int batch  = my_k / half_WG; \
++                int rowcol = my_k % half_WG; \
++                int row    = rowcol / half_W * 2; \
++                int col    = rowcol % half_W * 2; \
++                __global float const *dy = result + batch * N * IMG_H * IMG_W + row * IMG_W + col; \
++                raw_y = load_2x2_tile_raw(dy,row,col); \
++            } \
++        }
++    PREFETCH(k);
+     for(;k < K_limit;k+=WG_K)
+     {
+-        {
+-            int my_k = k + l_xtile_k;
+-            int batch  = my_k / half_WG;
+-            int rowcol = my_k % half_WG;
+-            int row    = rowcol / half_W * 2;
+-            int col    = rowcol % half_W * 2;
+-            __global float const *x = image + batch * C * IMG_H * IMG_W + (row - 1) * IMG_W + (col - 1);
+-            // load relevant tile       
+-            float16 my_xtile = (k + l_xtile_k < K_limit && l_xtile_c + wg_ch_in < C) ? load_4x4_tile_and_transform(x,row-1,col-1,image_base,image_end) : 0;
+-            store_local(l_xtile_ptr,l_xtile_stride,my_xtile);
+-        }
+-        {
+-            int my_k = k + l_ytile_k;
+-            int batch  = my_k / half_WG;
+-            int rowcol = my_k % half_WG;
+-            int row    = rowcol / half_W * 2;
+-            int col    = rowcol % half_W * 2;
+-             __global float const *dy = result + batch * N * IMG_H * IMG_W + row * IMG_W + col;
+-            // load relevant kernel
+-            float16 my_ytile = (k + l_ytile_k < K_limit && l_ytile_n + wg_ch_out < N) ? load_2x2_tile_and_transform(dy,row,col) : 0;
+-            store_local(l_ytile_ptr,l_ytile_stride,my_ytile);
+-        }
++        float16 my_xtile = x_ok ? transform_tile(raw_x) : 0;
++        store_local(l_xtile_ptr,l_xtile_stride,my_xtile);
++        float16 my_ytile = y_ok ? tile2x2_to_4x4(raw_y) : 0;
++        store_local(l_ytile_ptr,l_ytile_stride,my_ytile);
+ 
+         barrier(CLK_LOCAL_MEM_FENCE);
+ 
++        PREFETCH(k + WG_K);
++
+         // GEMM
+         #pragma unroll
+         for(int dk=0;dk<WG_K;dk++) {
+@@ -434,6 +444,8 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+ }
+ 
+ 
++
++
+ // Sum the split-K planes written above into the real filter gradient.
+ // dst = beta*dst + sum_k src[k]
+ __kernel void winconv_3x3_bwd_filter_reduce(
+diff --git a/src/kernels/winograd_fwd.cl b/src/kernels/winograd_fwd.cl
+index 9ba6f2d..01bd950 100644
+--- a/src/kernels/winograd_fwd.cl
++++ b/src/kernels/winograd_fwd.cl
+@@ -69,9 +69,10 @@ float16 transform_tile(float4 a[4])
+ }
+ 
+ 
+-float16 load_4x4_tile_and_transform_v2(__global const float * restrict frame,int pos,int limit,int end,int stride,int4 mask[4])
++// Raw (masked) 4x4 tile load; the Winograd input transform is applied later so
++// that the loads for the next K step can be in flight during this step's GEMM.
++void load_4x4_tile_raw(float4 a[4],__global const float * restrict frame,int pos,int limit,int end,int stride,int4 mask[4])
+ {
+-    float4 a[4];
+     frame += pos;
+     
+     if(pos >= 0 && pos < limit) {
+@@ -95,7 +96,6 @@ float16 load_4x4_tile_and_transform_v2(__global const float * restrict frame,int
+             }
+         }
+     }
+-    return transform_tile(a);
+ }
+ 
+ 
+@@ -201,6 +201,7 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+         l_val[15*strd] = v.sf;
+ }
+ 
++
+ #define WG_SIZE 256
+ #define TILES_IN_WG 32
+ #define KERNELS_IN_WG 32
+@@ -331,19 +332,38 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+ 
+     // store
+ 
++    // Software pipelining: the global loads for step k+1 are issued before
++    // step k's GEMM and consumed (transformed, stored to LDS) after it, so
++    // memory latency overlaps arithmetic instead of serialising with it.
++    float4 raw_tile[4] = {0,0,0,0};
++    float16 raw_kern = 0;
++    bool tile_ok = l_b < B && l_tile_k < C;
++    bool kern_ok = l_feature < N && l_kern_k < C;
++    if(tile_ok)
++        load_4x4_tile_raw(raw_tile,image,image_pos,image_limit,image_end,W,load_mask);
++    if(kern_ok)
++        raw_kern = kernels[l_kern_k * N + l_feature];
++
+     for(int k=0;k < C;k+=WG_K,image_pos += WG_K*W*H)
+     {
+-
+-        // load relevant tile        
+-        float16 my_tile = (l_b < B && k + l_tile_k < C) ? load_4x4_tile_and_transform_v2(image,image_pos,image_limit,image_end,W,load_mask) : 0; 
++        // step k: transform what was prefetched and publish it
++        float16 my_tile = tile_ok ? transform_tile(raw_tile) : 0;
+         store_local(l_tile_ptr,l_tile_stride,my_tile);
+-        
+-        // load relevant kernel
+-        float16 my_kern = (l_feature < N && k+l_kern_k < C) ? kernels[(k + l_kern_k) * N + l_feature] : 0;
+-        store_local(l_kern_ptr,l_kern_stride,my_kern);
++        store_local(l_kern_ptr,l_kern_stride,kern_ok ? raw_kern : (float16)0);
+ 
+         barrier(CLK_LOCAL_MEM_FENCE);
+ 
++        // prefetch step k+1 (overlaps the GEMM below)
++        {
++            int kn = k + WG_K;
++            tile_ok = l_b < B && kn + l_tile_k < C;
++            kern_ok = l_feature < N && kn + l_kern_k < C;
++            if(tile_ok)
++                load_4x4_tile_raw(raw_tile,image,image_pos + WG_K*W*H,image_limit,image_end,W,load_mask);
++            if(kern_ok)
++                raw_kern = kernels[(kn + l_kern_k) * N + l_feature];
++        }
++
+         // GEMM
+         #pragma unroll
+         for(int dk=0;dk<WG_K;dk++) {

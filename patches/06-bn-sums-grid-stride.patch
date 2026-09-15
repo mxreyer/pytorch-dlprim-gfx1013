@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mxreyer <236478497+mxreyer@users.noreply.github.com>
+Date: Tue, 15 Sep 2026 11:19:48 -0700
+Subject: [PATCH] bn_sums: grid-stride reduction loop
+
+Each work-item summed its own contiguous chunk of items/wg_size2
+elements, so neighbouring lanes read addresses that far apart and, for a
+512-channel 8x8 layer, every second lane jumped by channels*HW floats and
+hit the same cache sets on every step: 1.27 ms for 16 MB (13 GB/s) on an
+AMD gfx1013. A grid-stride loop has the lanes of a wave read consecutive
+elements of one row at every step, about 15x faster there. BatchNorm
+9.6 -> ~3 ms per ResNet-9 training step.
+---
+ src/kernels/bn_sums.cl | 46 ++++++++++++++++++------------------------
+ 1 file changed, 20 insertions(+), 26 deletions(-)
+
+diff --git a/src/kernels/bn_sums.cl b/src/kernels/bn_sums.cl
+index c1477ec..7a53dbb 100644
+--- a/src/kernels/bn_sums.cl
++++ b/src/kernels/bn_sums.cl
+@@ -62,35 +62,29 @@ void compute(
+ 
+     int items = batch * HW;
+     const int wg_size2 = WG_SIZE * SECOND_REDUCE_SIZE;
+-    int items_per_wg = (items + wg_size2 - 1) / wg_size2;
+-    int my_start = items_per_wg * get_global_id(0); // it is same as local id for 1stage reduce
+-    int my_end   = min(my_start + items_per_wg,items);
+ 
++    // Grid-stride loop: at every step the lanes of a wave read consecutive
++    // elements of one row. The previous form gave each work-item its own
++    // contiguous chunk, so neighbouring lanes read addresses items/wg_size2
++    // apart and, for a 512-channel 8x8 layer, every second lane jumped by
++    // channels*HW floats - the same cache sets every time. That launch took
++    // 1.27 ms for 16 MB (13 GB/s) on an AMD gfx1013; this form is ~15x faster.
+     float sum1 = 0;
+     float sum2 = 0;
+-    int b  = my_start / HW;
+-    int rc = my_start % HW;
+-
+-    #pragma unroll(16)
+-    for(int index = my_start;index <my_end;index ++) {
+-        if(b < batch && rc < HW) {
+-            int pos = b*(channels * HW) + rc;
+-            #if BACKWARD == 1
+-                float xv  =   x[pos];
+-                float dyv =  dy[pos];
+-                sum1 += xv*dyv;
+-                sum2 += dyv;
+-            #else
+-                float val =   x[pos];
+-                sum1 += val;
+-                sum2 += val*val;
+-            #endif
+-        }
+-        rc++;
+-        if(rc == HW) {
+-            rc = 0;
+-            b ++;
+-        }
++    for(int index = get_global_id(0);index < items;index += wg_size2) {
++        int b  = index / HW;
++        int rc = index - b * HW;
++        int pos = b*(channels * HW) + rc;
++        #if BACKWARD == 1
++            float xv  =   x[pos];
++            float dyv =  dy[pos];
++            sum1 += xv*dyv;
++            sum2 += dyv;
++        #else
++            float val =   x[pos];
++            sum1 += val;
++            sum2 += val*val;
++        #endif
+     }
+ 
+     REDUCE_PREPARE_X2(WG_SIZE,float);

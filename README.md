@@ -42,17 +42,38 @@ ResNet-9 layer shape.
 | [HANDOFF.md](HANDOFF.md) | Where things stand, what is still open, the constraints to keep in mind. (For a future Claude session.) |
 | `tools/` | Microbenchmarks (`ocl-micro.c`, `libclc-probe.c`, `fp16-micro.c`), correctness sweeps (`wino-repro.py`, `bn-check.py`, ...), a Mesa-from-source container (`mesa-dev/`). |
 | `upstream/` | Reports ready to file: three bugs and one proposal for `dlprimitives`, one for `pytorch_dlprim`, two for Mesa/rusticl. |
+| `patches/` | The `dlprimitives` changes as a stacked series, one patch per report. |
 
 ## The patches
 
-Four patches against `pytorch_dlprim` and its `dlprimitives` submodule.
+Three patches at the top level plus a series in `patches/`, against
+`pytorch_dlprim` and its `dlprimitives` submodule.
 
 | patch | against | what |
 | --- | --- | --- |
 | `custom_reduce.patch` | dlprimitives | **Correctness.** Use the portable work-group reduction instead of the OpenCL 2.0 built-ins rusticl lacks. Without it softmax, cross-entropy, bias gradients and BatchNorm sums fail to compile. |
-| `winograd_ksplit.patch` | dlprimitives | **Performance.** All of the convolution work: fill all 40 CUs in the Winograd backward-filter kernel, replace emulated fp32 atomics with plane writes plus a reduce, fix four memory access patterns, prefetch the next K step, opt-in fp16 inner loop. Also builds the activation kernels with their dtype. |
+| `patches/01`–`08` | dlprimitives | **Correctness and performance**, one patch per upstream report (table below). |
+| `patches/09-local-knobs.patch` | dlprimitives | The environment variables and the partials-hash diagnostic used for the measurements. Local only. |
 | `pytorch_ocl_half_fixes.patch` | pytorch_dlprim | **Correctness for half tensors.** Reject non-float32 in convolution (it silently returned NaN); dtype-correct hardtanh/relu6/clamp; contiguous grad in `hardtanh_backward`. |
 | `gelu_mad.patch` | pytorch_dlprim | **Performance.** `fma()` → `mad()` in GELU backward. On Mesa < 26.2 rusticl's `fma()` is a 563-instruction software emulation (3.8× on GELU backward). Redundant but harmless on 26.2+. |
+
+The `dlprimitives` series is stacked in the order the changes were measured,
+so each patch's number is the step it adds. `git format-patch` output, with
+the commit message that would go in the PR; `git apply` and `git am` both
+take them. Measured on 2026-09-15 with `tools/profile-step.py 128 20`,
+ResNet-9 training step at batch 128:
+
+| patch | report in `upstream/` | img/s after |
+| --- | --- | ---: |
+| `01-activation-dtype` | dlprimitives-activation-half-dtype | 915 (stock) |
+| `02-winograd-ksplit-heuristic` | dlprimitives-winograd-ksplit-heuristic | 984 |
+| `03-winograd-no-atomics` | dlprimitives-winograd-performance §1 | 1,477 |
+| `04-winograd-fwd-filter-layout` | dlprimitives-winograd-performance §2 | 1,634 |
+| `05-winograd-bwd-filter-loads` | dlprimitives-winograd-performance §2 | 1,815 |
+| `06-bn-sums-grid-stride` | dlprimitives-winograd-performance §2 | 1,949 |
+| `07-winograd-prefetch` | dlprimitives-winograd-performance §3 | 2,068 |
+| `08-winograd-fp16` | dlprimitives-winograd-performance §4 | 2,062 off / 2,886 with `DLPRIM_CONV_FP16=1` |
+| `09-local-knobs` | — | 2,061 |
 
 ### Why the reduction fails to compile
 
@@ -99,7 +120,8 @@ suspecting the code (HANDOFF.md has the procedure).
 
 ### Environment variables
 
-Added by `winograd_ksplit.patch`. An algorithm passed explicitly by the caller
+`DLPRIM_CONV_FP16` is added by `patches/08`, the rest by
+`patches/09-local-knobs.patch`. An algorithm passed explicitly by the caller
 always wins, so these are inert unless set.
 
 ```
@@ -110,8 +132,9 @@ DLPRIM_CONV_BWD_FILTER_ALGO    (same, backward-filter only)
 DLPRIM_WINOGRAD_KSPLIT         stock | <n>   stock = the original heuristic
 DLPRIM_WINOGRAD_KSPLIT_TARGET  <n>           work-groups per CU to aim for (default 4)
 DLPRIM_WINOGRAD_KSPLIT_MAX     <n>           split-K cap (default 16)
-DLPRIM_WINOGRAD_SPLIT_PLANES   0 | 1         backward-filter without atomics (default 1)
-DLPRIM_WINOGRAD_BWD_PLANES     0 | 1         backward-data without atomics (default 1)
+DLPRIM_WINOGRAD_SPLIT_PLANES   0 | 1         backward-filter without atomics (default 1 unless the
+DLPRIM_WINOGRAD_BWD_PLANES     0 | 1         backward-data without atomics    device is NVIDIA or has
+                                             cl_ext_float_atomics)
 DLPRIM_WINOGRAD_STRIDE_OFFSET  <n>           LDS padding (default 0 on AMD)
 DLPRIM_WINOGRAD_TR_OFFSET      <n>           LDS padding, transpose stage
 DLPRIM_CONV_FP16               0 | 1         fp16 LDS tiles + packed-fp16 GEMM, fp32 tensors
@@ -136,7 +159,7 @@ Requires `python3.12`, `python3.12-devel`, `cmake`, `git`, `sqlite-devel`,
    and the `pytorch_ocl` 0.2.0 wheel. Reused between runs; `rm -rf scratch/`
    to start clean.
 2. Fetches `pytorch_dlprim` at the commit pinned in `build.sh` (submodule
-   checked against its own pin), applies the four patches. Bumping the pins
+   checked against its own pin), applies the patches. Bumping the pins
    is a deliberate step: re-check every `git apply`, rebuild, re-run
    `tools/wino-repro.py` and `tools/bn-check.py`.
 3. Builds and leaves the stripped extension at `./pt_ocl.so`.

@@ -39,7 +39,7 @@ looks like it is.
 | # | Finding | Where | Status |
 | - | --- | --- | --- |
 | 1 | `fma()` compiles to a **563-instruction software emulation**, 120× slower than `mad()` | rusticl < 26.2 (never tells libclc the device has hardware fma) | fixed in our kernels (`gelu_mad.patch`); native on Mesa 26.2 |
-| 2 | Winograd backward-filter launches **16 work-groups onto 40 CUs** | dlprimitives heuristic | fixed (`winograd_ksplit.patch`) |
+| 2 | Winograd backward-filter launches **16 work-groups onto 40 CUs** | dlprimitives heuristic | fixed (`patches/02-winograd-ksplit-heuristic.patch`) |
 | 3 | Both backward kernels run on **emulated float atomics** — a third of the training step. Removing them is worth **+46%**. The "ACO `s_waitcnt` bug" that kept the fix gated for two weeks was the **clock governor's idle-floor undervolt** (1000 MHz @ 718 mV) | half silicon, half `dlprimitives`, then a config file | **fixed and shipping**: 1,374 img/s, no driver flags; voltage restored to the governor default |
 | 4 | rusticl **misreports** LDS and cache as absent | rusticl device info | reports drafted in `upstream/`; no impact on this stack |
 | 5 | Throttling / launch overhead / memory bandwidth / wrong conv algorithm | — | **all ruled out** |
@@ -161,7 +161,7 @@ kernel**.
 The image size never enters the formula at all, so the amount of reduction work
 available to split is not considered either.
 
-`winograd_ksplit.patch` picks the
+`patches/02-winograd-ksplit-heuristic.patch` picks the
 split from how many work-groups the launch actually has versus how many CUs
 there are to fill (aiming for ~4 work-groups per CU), and refuses to split
 further than there is K work to divide. Per-call, averaged over 10 steps:
@@ -253,7 +253,7 @@ denominators match:
 | | GPU time per step |
 | --- | ---: |
 | stock | 137.75 ms |
-| with `winograd_ksplit.patch` | 128.32 ms |
+| with `patches/02-winograd-ksplit-heuristic.patch` | 128.32 ms |
 | …and atomics removed (speed-of-light, incorrect results) | **106.32 ms** |
 
 The atomics cost **22.0 ms, or 17% of GPU time per step**. Strip them and
@@ -533,7 +533,7 @@ a fresh kernel cache:
 
 At the time this read as: the bug is not fixed in 26.2, it is ten times more
 frequent, and `force-waitcnt` is no longer a complete workaround — so for a few
-hours the interlock in `winograd_ksplit.patch` grew a `CL_DRIVER_VERSION` check
+hours the interlock in the conv patch grew a `CL_DRIVER_VERSION` check
 that refused the fast paths on anything but Mesa 26.1, and the report gained a
 "worse on 26.2" section. Both are gone now; the next section explains why.
 
@@ -611,7 +611,7 @@ And the performance, with `force-waitcnt` gone for good:
 
 **+46% training, inference unchanged** — the number this whole finding said
 was locked behind an upstream compiler fix. The interlock is gone from
-`winograd_ksplit.patch`; the atomics-free paths are on by default with
+`patches/03-winograd-no-atomics.patch`; the atomics-free paths are on by default with
 `DLPRIM_WINOGRAD_BWD_PLANES=0` / `DLPRIM_WINOGRAD_SPLIT_PLANES=0` as the way
 back to the atomic kernels for comparison. The upstream report in `upstream/`
 is withdrawn before filing.

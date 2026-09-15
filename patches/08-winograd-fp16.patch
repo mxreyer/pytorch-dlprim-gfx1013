@@ -1,0 +1,518 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mxreyer <236478497+mxreyer@users.noreply.github.com>
+Date: Tue, 15 Sep 2026 11:23:00 -0700
+Subject: [PATCH] winograd: optional fp16 inner loop (DLPRIM_CONV_FP16=1)
+
+Behind an environment variable, off by default: the three Winograd kernels
+convert their tiles to half on the way into LDS and run the register-tile
+GEMM as half2 mad with half accumulation over one work-group's K slice
+(packed v_pk_fma_f16, twice the fp32 rate on RDNA). Tensors in global
+memory stay fp32; the backward-filter split-K target is raised (16 per CU,
+cap 64) so the fp16 sums stay short, which halves the dW error.
+
+On an AMD gfx1013: forward 15.0 -> 8.9 ms, backward-data 16.0 -> 10.2,
+backward-filter 19.4 -> 12.4 per ResNet-9 step, 2,055 -> 2,987 img/s.
+Y/dX/dW within ~0.5% of fp32, about 10x looser than TF32, hence opt-in.
+A variant with fp32 accumulation via v_fma_mix_f32 was measured too:
+TF32-class accuracy but slower than plain fp32 on this chip.
+---
+ src/core/conv.cpp                  | 30 ++++++++++---
+ src/kernels/winograd_bwd_data.cl   | 68 ++++++++++++++++++++++++++---
+ src/kernels/winograd_bwd_filter.cl | 69 ++++++++++++++++++++++++++---
+ src/kernels/winograd_fwd.cl        | 70 +++++++++++++++++++++++++++---
+ 4 files changed, 214 insertions(+), 23 deletions(-)
+
+diff --git a/src/core/conv.cpp b/src/core/conv.cpp
+index 01bad54..dc07b4a 100644
+--- a/src/core/conv.cpp
++++ b/src/core/conv.cpp
+@@ -10,6 +10,7 @@
+ #include <dlprim/core/common.hpp>
+ #include <dlprim/gpu/gemm.hpp>
+ #include <dlprim/gpu/program_cache.hpp>
++#include <cstdlib>
+ #include <iostream>
+ 
+ namespace dlprim {
+@@ -230,6 +231,19 @@ namespace core {
+             || ctx.device_extensions().find("cl_ext_float_atomics") != std::string::npos;
+     }
+ 
++    // DLPRIM_CONV_FP16=1: the three Winograd kernels keep their LDS tiles and
++    // run their register-tile GEMM in fp16 (packed v_pk_fma_f16, twice the
++    // fp32 rate on RDNA), with fp16 accumulation over one work-group's K
++    // slice. Tensors in global memory stay fp32. Measured on an AMD gfx1013:
++    // forward 15.0 -> 8.9 ms, backward-data 16.0 -> 10.2, backward-filter
++    // 19.4 -> 12.4 per ResNet-9 step; Y/dX within ~0.5% of fp32, dW ~0.5%
++    // with the shorter K slices below. Off by default: fp32 callers get fp32.
++    static bool conv_fp16()
++    {
++        char const *e = getenv("DLPRIM_CONV_FP16");
++        return e && *e && atoi(e) != 0;
++    }
++
+     class Conv2DForwardWinograd : public Conv2DForward {
+     public:
+         virtual char const *algo() const
+@@ -297,6 +311,7 @@ namespace core {
+                                             "ACTIVATION",int(activation),
+                                             "STRIDE_OFFSET",off,
+                                             "TR_STRIDE_OFFSET",toff,
++                                            "HALF_GEMM",conv_fp16() ? 1 : 0,
+                                             "BIAS",int(bias));
+             conv_kernel_ = cl::Kernel(prog,"winconv_calc_gkgt_3x3");
+             conv_ = cl::Kernel(prog,"winconv_3x3");
+@@ -336,7 +351,8 @@ namespace core {
+             }
+             cl::Program const &prog = gpu::Cache::instance().get_program(ctx,"winograd_bwd_data",
+                         "STRIDE_OFFSET",off,"TR_STRIDE_OFFSET",toff,
+-                        "USE_PLANES",int(use_planes_));
++                        "USE_PLANES",int(use_planes_),
++                        "HALF_GEMM",conv_fp16() ? 1 : 0);
+             conv_kernel_bwd_ = cl::Kernel(prog,"winconv_calc_gkgt_3x3");
+             bw_conv_data_ = cl::Kernel(prog,"winconv_3x3_bwd_data");
+             if(use_planes_)
+@@ -453,13 +469,16 @@ namespace core {
+             // below CU/4 (AMD) or CU/2 (NVIDIA) work-groups: on a 40-CU part a
+             // 128->128 layer ran its 16 work-groups unsplit with 24 CUs idle.
+             // Aim for ~4 work-groups per CU (8, 16 and 32 measured the same),
+-            // and never split a slice below 16 K items.
++            // and never split a slice below 16 K items. With the fp16 inner
++            // loop, shorter K slices halve the accumulation error (dW 1.1% ->
++            // 0.5%) at no measured cost.
+             int wg_count = ((config_.channels_in + 31) / 32)
+                          * ((config_.channels_out + 31) / 32);
+             int cu = ctx.device().getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>();
+-            int target = cu * 4;
++            int per_cu = conv_fp16() ? 16 : 4, cap = conv_fp16() ? 64 : 16;
++            int target = cu * per_cu;
+             k_split_ = 1;
+-            while(k_split_ < 16 && wg_count * k_split_ < target)
++            while(k_split_ < cap && wg_count * k_split_ < target)
+                 k_split_ *= 2;
+             int k_work = config.shape[0] * ((h + 1) / 2) * ((w + 1) / 2);
+             while(k_split_ > 1 && k_work / k_split_ < 16)
+@@ -488,7 +507,8 @@ namespace core {
+                                                                             "IMG_H",h,"IMG_W",w,
+                                                                             "STRIDE_OFFSET",off,
+                                                                             "TR_STRIDE_OFFSET",toff,
+-                                                                            "USE_SPLIT_PLANES",int(use_split_planes_));
++                                                                            "USE_SPLIT_PLANES",int(use_split_planes_),
++                                                                            "HALF_GEMM",conv_fp16() ? 1 : 0);
+             bw_conv_filter_ = cl::Kernel(prog,"winconv_3x3_bwd_filter");
+             if(k_split_ > 1 && use_split_planes_)
+                 reduce_ = cl::Kernel(prog,"winconv_3x3_bwd_filter_reduce");
+diff --git a/src/kernels/winograd_bwd_data.cl b/src/kernels/winograd_bwd_data.cl
+index 2685fbb..d45058a 100644
+--- a/src/kernels/winograd_bwd_data.cl
++++ b/src/kernels/winograd_bwd_data.cl
+@@ -196,6 +196,27 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+         l_val[15*strd] = v.sf;
+ }
+ 
++#ifndef HALF_GEMM
++#define HALF_GEMM 0
++#endif
++#if HALF_GEMM
++#pragma OPENCL EXTENSION cl_khr_fp16 : enable
++// Opt-in fp16 inner loop: LDS tiles and the register-tile GEMM in fp16 (packed
++// v_pk_fma_f16, fp16 accumulation). Global storage stays fp32.
++#define LTYPE half
++inline void store_local_h(__local half *l_val,int strd,float16 v)
++{
++        half16 h = convert_half16(v);
++        l_val[ 0*strd] = h.s0; l_val[ 1*strd] = h.s1; l_val[ 2*strd] = h.s2; l_val[ 3*strd] = h.s3;
++        l_val[ 4*strd] = h.s4; l_val[ 5*strd] = h.s5; l_val[ 6*strd] = h.s6; l_val[ 7*strd] = h.s7;
++        l_val[ 8*strd] = h.s8; l_val[ 9*strd] = h.s9; l_val[10*strd] = h.sa; l_val[11*strd] = h.sb;
++        l_val[12*strd] = h.sc; l_val[13*strd] = h.sd; l_val[14*strd] = h.se; l_val[15*strd] = h.sf;
++}
++#define STORE_LOCAL store_local_h
++#else
++#define LTYPE float
++#define STORE_LOCAL store_local
++#endif
+ 
+ #define WG_SIZE 256
+ #define TILES_IN_WG 32
+@@ -249,7 +270,7 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+     int half_H = (H+1)/2;
+     int half_WG = half_W * half_H;
+ 
+-    __local float wg_local_memory[(TILES_IN_WG + KERNELS_IN_WG + 16 * PADDING_FACTOR) * WG_K * 16];
++    __local LTYPE wg_local_memory[(TILES_IN_WG + KERNELS_IN_WG + 16 * PADDING_FACTOR) * WG_K * 16];
+ 
+ #define l_tile_stride (TILES_IN_WG * WG_K + STRIDE_OFFSET)
+ #define l_kern_stride (KERNELS_IN_WG * WG_K + STRIDE_OFFSET)
+@@ -297,8 +318,8 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+ 
+     #define s_img_tile(k,t,indx) wg_local_memory[(k)*(TILES_IN_WG/2*16 + TR_STRIDE_OFFSET) + (t/2) * 16 + (indx)]
+     
+-    __local float *l_tile_ptr = &l_tiles(0,l_tile_k,l_tile_rc);
+-    __local float *l_kern_ptr = &l_kernels(0,l_kern_k,l_kern_n);
++    __local LTYPE *l_tile_ptr = &l_tiles(0,l_tile_k,l_tile_rc);
++    __local LTYPE *l_kern_ptr = &l_kernels(0,l_kern_k,l_kern_n);
+ 
+     // GEMM
+ 
+@@ -307,7 +328,13 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+     int my_gemm_tile_kr = my_gemm_tile_tk / (TILES_IN_WG / PATCH_T) * PATCH_K;
+     int my_gemm_tile_tl = my_gemm_tile_tk % (TILES_IN_WG / PATCH_T) * PATCH_T;
+ 
++#if HALF_GEMM
++    half2 p_Ch[PATCH_K][PATCH_T/2]={{(half2)(0.0h)}};
++    #define PC(dr,dc) ((float)(((dc)&1) ? p_Ch[dr][(dc)/2].s1 : p_Ch[dr][(dc)/2].s0))
++#else
+     float p_C[PATCH_K][PATCH_T]={{0}};
++    #define PC(dr,dc) p_C[dr][dc]
++#endif
+ 
+     // store
+ 
+@@ -325,8 +352,8 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+     for(int k=0;k < N;k+=WG_K,result_pos += WG_K*W*H)
+     {
+         float16 my_tile = tile_ok ? tile2x2_to_4x4(raw_tile) : 0;
+-        store_local(l_tile_ptr,l_tile_stride,my_tile);
+-        store_local(l_kern_ptr,l_kern_stride,kern_ok ? raw_kern : (float16)0);
++        STORE_LOCAL(l_tile_ptr,l_tile_stride,my_tile);
++        STORE_LOCAL(l_kern_ptr,l_kern_stride,kern_ok ? raw_kern : (float16)0);
+ 
+         barrier(CLK_LOCAL_MEM_FENCE);
+ 
+@@ -341,6 +368,30 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+         }
+ 
+         // GEMM
++#if HALF_GEMM
++        #pragma unroll
++        for(int dk=0;dk<WG_K;dk++) {
++            half p_kern[PATCH_K];
++            #pragma unroll
++            for(int dr=0;dr<PATCH_K;dr++) {
++                p_kern[dr] = l_kernels(my_gemm_tile_b,dk,dr + my_gemm_tile_kr);
++            }
++            half2 p_tile[PATCH_T/2];
++            #pragma unroll
++            for(int dc=0;dc<PATCH_T;dc+=2) {
++                p_tile[dc/2] = (half2)(l_tiles(my_gemm_tile_b,dk,dc + my_gemm_tile_tl),
++                                       l_tiles(my_gemm_tile_b,dk,dc + 1 + my_gemm_tile_tl));
++            }
++            #pragma unroll
++            for(int dr=0;dr<PATCH_K;dr++) {
++                half2 kk = (half2)(p_kern[dr]);
++                #pragma unroll
++                for(int j=0;j<PATCH_T/2;j++) {
++                    p_Ch[dr][j] = mad(kk,p_tile[j],p_Ch[dr][j]);
++                }
++            }
++        }
++#else
+         #pragma unroll
+         for(int dk=0;dk<WG_K;dk++) {
+             float p_kern[PATCH_K];
+@@ -362,6 +413,7 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+                 }
+             }
+         }
++#endif
+         barrier(CLK_LOCAL_MEM_FENCE);
+     }
+ 
+@@ -379,7 +431,7 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+             #pragma unroll
+             for(int dc=0;dc<PATCH_T;dc+=2) {
+                 int tile_c = dc + dc_split + my_gemm_tile_tl;
+-                s_img_tile(tile_r,tile_c,my_gemm_tile_b) = p_C[dr][dc + dc_split];
++                s_img_tile(tile_r,tile_c,my_gemm_tile_b) = PC(dr,dc + dc_split);
+              }
+         }
+         
+@@ -390,7 +442,11 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+             
+             int s_col_t = s_col_t0 + dc + dc_split;
+ 
++#if HALF_GEMM
++            float16 s_tile = convert_float16(vload16(0,&s_img_tile(s_row_t,s_col_t,0)));
++#else
+             float16 s_tile = vload16(0,&s_img_tile(s_row_t,s_col_t,0));
++#endif
+             float s_img_tile[4][4];
+             transform_tile_bwd(s_tile,s_img_tile);
+ 
+diff --git a/src/kernels/winograd_bwd_filter.cl b/src/kernels/winograd_bwd_filter.cl
+index 7a0978f..66716d7 100644
+--- a/src/kernels/winograd_bwd_filter.cl
++++ b/src/kernels/winograd_bwd_filter.cl
+@@ -202,6 +202,28 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+         l_val[15*strd] = v.sf;
+ }
+ 
++#ifndef HALF_GEMM
++#define HALF_GEMM 0
++#endif
++#if HALF_GEMM
++#pragma OPENCL EXTENSION cl_khr_fp16 : enable
++// Opt-in fp16 inner loop: LDS tiles and the register-tile GEMM in fp16 (packed
++// v_pk_fma_f16). Accumulation is fp16 too, over this work-group's K slice only;
++// the slices are summed in fp32 by the reduce kernel.
++#define LTYPE half
++inline void store_local_h(__local half *l_val,int strd,float16 v)
++{
++        half16 h = convert_half16(v);
++        l_val[ 0*strd] = h.s0; l_val[ 1*strd] = h.s1; l_val[ 2*strd] = h.s2; l_val[ 3*strd] = h.s3;
++        l_val[ 4*strd] = h.s4; l_val[ 5*strd] = h.s5; l_val[ 6*strd] = h.s6; l_val[ 7*strd] = h.s7;
++        l_val[ 8*strd] = h.s8; l_val[ 9*strd] = h.s9; l_val[10*strd] = h.sa; l_val[11*strd] = h.sb;
++        l_val[12*strd] = h.sc; l_val[13*strd] = h.sd; l_val[14*strd] = h.se; l_val[15*strd] = h.sf;
++}
++#define STORE_LOCAL store_local_h
++#else
++#define LTYPE float
++#define STORE_LOCAL store_local
++#endif
+ 
+ #define WG_SIZE 256
+ #define XTILES_IN_WG 32
+@@ -256,7 +278,7 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+     #define half_H  ((IMG_H+1)/2)
+     #define half_WG (half_W * half_H)
+ 
+-    __local float wg_local_memory[(XTILES_IN_WG + YTILES_IN_WG + 16 * PADDING_FACTOR) * WG_K * 16];
++    __local LTYPE wg_local_memory[(XTILES_IN_WG + YTILES_IN_WG + 16 * PADDING_FACTOR) * WG_K * 16];
+ 
+ #define l_xtile_stride (XTILES_IN_WG * WG_K + STRIDE_OFFSET)
+ #define l_ytile_stride (YTILES_IN_WG * WG_K + STRIDE_OFFSET)
+@@ -282,8 +304,8 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+ 
+     #define s_img_tile(k,t,indx) wg_local_memory[(k)*(XTILES_IN_WG/2*16 + TR_STRIDE_OFFSET) + (t/2) * 16 + (indx)]
+     
+-    __local float *l_xtile_ptr = &l_xtiles(0,l_xtile_k,l_xtile_c);
+-    __local float *l_ytile_ptr = &l_ytiles(0,l_ytile_k,l_ytile_n);
++    __local LTYPE *l_xtile_ptr = &l_xtiles(0,l_xtile_k,l_xtile_c);
++    __local LTYPE *l_ytile_ptr = &l_ytiles(0,l_ytile_k,l_ytile_n);
+ 
+     // GEMM
+ 
+@@ -292,7 +314,13 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+     int my_gemm_tile_kr = my_gemm_tile_tk / (XTILES_IN_WG / PATCH_X) * PATCH_Y;
+     int my_gemm_tile_tl = my_gemm_tile_tk % (XTILES_IN_WG / PATCH_X) * PATCH_X;
+ 
++#if HALF_GEMM
++    half2 p_Ch[PATCH_Y][PATCH_X/2]={{(half2)(0.0h)}};
++    #define PC(dr,dc) ((float)(((dc)&1) ? p_Ch[dr][(dc)/2].s1 : p_Ch[dr][(dc)/2].s0))
++#else
+     float p_C[PATCH_Y][PATCH_X]={{0}};
++    #define PC(dr,dc) p_C[dr][dc]
++#endif
+ 
+     int k=0;
+     int K_limit = B * half_WG;
+@@ -341,15 +369,39 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+     for(;k < K_limit;k+=WG_K)
+     {
+         float16 my_xtile = x_ok ? transform_tile(raw_x) : 0;
+-        store_local(l_xtile_ptr,l_xtile_stride,my_xtile);
++        STORE_LOCAL(l_xtile_ptr,l_xtile_stride,my_xtile);
+         float16 my_ytile = y_ok ? tile2x2_to_4x4(raw_y) : 0;
+-        store_local(l_ytile_ptr,l_ytile_stride,my_ytile);
++        STORE_LOCAL(l_ytile_ptr,l_ytile_stride,my_ytile);
+ 
+         barrier(CLK_LOCAL_MEM_FENCE);
+ 
+         PREFETCH(k + WG_K);
+ 
+         // GEMM
++#if HALF_GEMM
++        #pragma unroll
++        for(int dk=0;dk<WG_K;dk++) {
++            half p_y[PATCH_Y];
++            #pragma unroll
++            for(int dr=0;dr<PATCH_Y;dr++) {
++                p_y[dr] = l_ytiles(my_gemm_tile_b,dk,dr + my_gemm_tile_kr);
++            }
++            half2 p_x[PATCH_X/2];
++            #pragma unroll
++            for(int dc=0;dc<PATCH_X;dc+=2) {
++                p_x[dc/2] = (half2)(l_xtiles(my_gemm_tile_b,dk,dc + my_gemm_tile_tl),
++                                    l_xtiles(my_gemm_tile_b,dk,dc + 1 + my_gemm_tile_tl));
++            }
++            #pragma unroll
++            for(int dr=0;dr<PATCH_Y;dr++) {
++                half2 yy = (half2)(p_y[dr]);
++                #pragma unroll
++                for(int j=0;j<PATCH_X/2;j++) {
++                    p_Ch[dr][j] = mad(yy,p_x[j],p_Ch[dr][j]);
++                }
++            }
++        }
++#else
+         #pragma unroll
+         for(int dk=0;dk<WG_K;dk++) {
+             float p_y[PATCH_Y];
+@@ -371,6 +423,7 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+                 }
+             }
+         }
++#endif
+         barrier(CLK_LOCAL_MEM_FENCE);
+     }
+ 
+@@ -388,7 +441,7 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+             #pragma unroll
+             for(int dc=0;dc<PATCH_X;dc+=2) {
+                 int tile_c = dc + dc_split + my_gemm_tile_tl;
+-                s_img_tile(tile_r,tile_c,my_gemm_tile_b) = p_C[dr][dc + dc_split];
++                s_img_tile(tile_r,tile_c,my_gemm_tile_b) = PC(dr,dc + dc_split);
+              }
+         }
+         
+@@ -405,7 +458,11 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+             if(kern_ch_out >= N || kern_ch_in >= C)
+                 continue;
+ 
++#if HALF_GEMM
++            float16 s_kern16 = convert_float16(vload16(0,&s_img_tile(s_row_t,s_col_t,0)));
++#else
+             float16 s_kern16 = vload16(0,&s_img_tile(s_row_t,s_col_t,0));
++#endif
+             float s_kern9[9];
+             transform_kernel_bwd(s_kern16,s_kern9);
+             __global float *ptr = kernels + 9* (kern_ch_in +  kern_ch_out * C);
+diff --git a/src/kernels/winograd_fwd.cl b/src/kernels/winograd_fwd.cl
+index 01bd950..b916ea4 100644
+--- a/src/kernels/winograd_fwd.cl
++++ b/src/kernels/winograd_fwd.cl
+@@ -201,6 +201,29 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+         l_val[15*strd] = v.sf;
+ }
+ 
++#ifndef HALF_GEMM
++#define HALF_GEMM 0
++#endif
++#if HALF_GEMM
++#pragma OPENCL EXTENSION cl_khr_fp16 : enable
++// Opt-in fp16 inner loop (DLPRIM_CONV_FP16=1): LDS tiles and the register-tile
++// GEMM in fp16 (packed v_pk_fma_f16, fp16 accumulation). Global storage stays
++// fp32. A variant with fp32 accumulation via v_fma_mix_f32 was measured too:
++// TF32-class accuracy but slower than plain fp32 on this chip, so it is not here.
++#define LTYPE half
++inline void store_local_h(__local half *l_val,int strd,float16 v)
++{
++        half16 h = convert_half16(v);
++        l_val[ 0*strd] = h.s0; l_val[ 1*strd] = h.s1; l_val[ 2*strd] = h.s2; l_val[ 3*strd] = h.s3;
++        l_val[ 4*strd] = h.s4; l_val[ 5*strd] = h.s5; l_val[ 6*strd] = h.s6; l_val[ 7*strd] = h.s7;
++        l_val[ 8*strd] = h.s8; l_val[ 9*strd] = h.s9; l_val[10*strd] = h.sa; l_val[11*strd] = h.sb;
++        l_val[12*strd] = h.sc; l_val[13*strd] = h.sd; l_val[14*strd] = h.se; l_val[15*strd] = h.sf;
++}
++#define STORE_LOCAL store_local_h
++#else
++#define LTYPE float
++#define STORE_LOCAL store_local
++#endif
+ 
+ #define WG_SIZE 256
+ #define TILES_IN_WG 32
+@@ -266,7 +289,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+     int half_H = (H+1)/2;
+     int half_WG = half_W * half_H;
+ 
+-    __local float wg_local_memory[(TILES_IN_WG + KERNELS_IN_WG + (16*PADDING_FACTOR)) * WG_K * 16];
++    __local LTYPE wg_local_memory[(TILES_IN_WG + KERNELS_IN_WG + (16*PADDING_FACTOR)) * WG_K * 16];
+ 
+ #define l_tile_stride (TILES_IN_WG * WG_K + STRIDE_OFFSET)
+ #define l_kern_stride (KERNELS_IN_WG * WG_K + STRIDE_OFFSET)
+@@ -318,8 +341,8 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+ 
+     #define s_img_tile(k,t,indx) wg_local_memory[(k)*(TILES_IN_WG/2*16 + TR_STRIDE_OFFSET) + (t/2) * 16 + (indx)]
+     
+-    __local float *l_tile_ptr = &l_tiles(0,l_tile_k,l_tile_rc);
+-    __local float *l_kern_ptr = &l_kernels(0,l_kern_k,l_kern_n);
++    __local LTYPE *l_tile_ptr = &l_tiles(0,l_tile_k,l_tile_rc);
++    __local LTYPE *l_kern_ptr = &l_kernels(0,l_kern_k,l_kern_n);
+ 
+     // GEMM
+ 
+@@ -328,7 +351,13 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+     int my_gemm_tile_kr = my_gemm_tile_tk / (TILES_IN_WG / PATCH_T) * PATCH_K;
+     int my_gemm_tile_tl = my_gemm_tile_tk % (TILES_IN_WG / PATCH_T) * PATCH_T;
+ 
++#if HALF_GEMM
++    half2 p_Ch[PATCH_K][PATCH_T/2]={{(half2)(0.0h)}};
++    #define PC(dr,dc) ((float)(((dc)&1) ? p_Ch[dr][(dc)/2].s1 : p_Ch[dr][(dc)/2].s0))
++#else
+     float p_C[PATCH_K][PATCH_T]={{0}};
++    #define PC(dr,dc) p_C[dr][dc]
++#endif
+ 
+     // store
+ 
+@@ -348,8 +377,8 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+     {
+         // step k: transform what was prefetched and publish it
+         float16 my_tile = tile_ok ? transform_tile(raw_tile) : 0;
+-        store_local(l_tile_ptr,l_tile_stride,my_tile);
+-        store_local(l_kern_ptr,l_kern_stride,kern_ok ? raw_kern : (float16)0);
++        STORE_LOCAL(l_tile_ptr,l_tile_stride,my_tile);
++        STORE_LOCAL(l_kern_ptr,l_kern_stride,kern_ok ? raw_kern : (float16)0);
+ 
+         barrier(CLK_LOCAL_MEM_FENCE);
+ 
+@@ -365,6 +394,30 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+         }
+ 
+         // GEMM
++#if HALF_GEMM
++        #pragma unroll
++        for(int dk=0;dk<WG_K;dk++) {
++            half p_kern[PATCH_K];
++            #pragma unroll
++            for(int dr=0;dr<PATCH_K;dr++) {
++                p_kern[dr] = l_kernels(my_gemm_tile_b,dk,dr + my_gemm_tile_kr);
++            }
++            half2 p_tile[PATCH_T/2];
++            #pragma unroll
++            for(int dc=0;dc<PATCH_T;dc+=2) {
++                p_tile[dc/2] = (half2)(l_tiles(my_gemm_tile_b,dk,dc + my_gemm_tile_tl),
++                                       l_tiles(my_gemm_tile_b,dk,dc + 1 + my_gemm_tile_tl));
++            }
++            #pragma unroll
++            for(int dr=0;dr<PATCH_K;dr++) {
++                half2 kk = (half2)(p_kern[dr]);
++                #pragma unroll
++                for(int j=0;j<PATCH_T/2;j++) {
++                    p_Ch[dr][j] = mad(kk,p_tile[j],p_Ch[dr][j]);
++                }
++            }
++        }
++#else
+         #pragma unroll
+         for(int dk=0;dk<WG_K;dk++) {
+             float p_kern[PATCH_K];
+@@ -386,6 +439,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+                 }
+             }
+         }
++#endif
+         barrier(CLK_LOCAL_MEM_FENCE);
+     }
+ 
+@@ -403,7 +457,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+             #pragma unroll
+             for(int dc=0;dc<PATCH_T;dc+=2) {
+                 int tile_c = dc + dc_split + my_gemm_tile_tl;
+-                s_img_tile(tile_r,tile_c,my_gemm_tile_b) = p_C[dr][dc + dc_split];
++                s_img_tile(tile_r,tile_c,my_gemm_tile_b) = PC(dr,dc + dc_split);
+              }
+         }
+         
+@@ -414,7 +468,11 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+             
+             int s_col_t = s_col_t0 + dc + dc_split;
+ 
++#if HALF_GEMM
++            float16 s_tile = convert_float16(vload16(0,&s_img_tile(s_row_t,s_col_t,0)));
++#else
+             float16 s_tile = vload16(0,&s_img_tile(s_row_t,s_col_t,0));
++#endif
+             float4 s_img_tile = tile4x4_after_wingorad_to_2x2(s_tile);
+ 
+             int s_brc = wg_brc + s_col_t;

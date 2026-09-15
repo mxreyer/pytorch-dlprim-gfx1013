@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rebuild pytorch_ocl (pytorch_dlprim) with the four gfx1013 patches applied.
+# Rebuild pytorch_ocl (pytorch_dlprim) with the gfx1013 patches applied.
 # See README.md for what they do and OPENCL-PERF.md for the measurements.
 #
 # Self-contained: run from anywhere. Builds a Python 3.12 venv in ./scratch
@@ -52,9 +52,11 @@ fi
 echo "== applying patches =="
 # Correctness: rusticl has no work_group_reduce_* (a driver feature gap).
 git -C "$SCRATCH/src/dlprimitives" apply "$HERE/custom_reduce.patch"
-# Performance: all of the convolution work (occupancy, atomics-free planes,
-# access patterns, prefetch, opt-in fp16) plus the activation dtype fix.
-git -C "$SCRATCH/src/dlprimitives" apply "$HERE/winograd_ksplit.patch"
+# The dlprimitives series (patches/01..08 are the upstream-ready pieces, one
+# per report in upstream/; 09 is the local measurement knobs). Order matters.
+for p in "$HERE"/patches/0[1-9]-*.patch; do
+    git -C "$SCRATCH/src/dlprimitives" apply "$p"
+done
 # Performance: OpenCL fma() is a software emulation on rusticl before Mesa
 # 26.2; use mad(). Redundant but harmless on 26.2.
 git -C "$SCRATCH/src"              apply "$HERE/gelu_mad.patch"

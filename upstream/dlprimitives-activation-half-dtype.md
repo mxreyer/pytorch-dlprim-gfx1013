@@ -30,8 +30,8 @@ cl::Program const &prog = gpu::Cache::instance().get_program(ctx, "activation",
 
 with a `DLPRIM_CHECK` that input and output dtypes match. In
 `activation_diff` the `beta` argument is then better taken as `float` and cast
-inside the kernel, since the host passes a float. Patch: the `activation.cpp`
-/ `activation.cl` hunks of `winograd_ksplit.patch` in
+inside the kernel, since the host passes a float. Patch:
+`patches/01-activation-dtype.patch` in
 https://github.com/mxreyer/pytorch-dlprim-gfx1013; `tools/act-half.py` there
 checks each activation on half against CPU.
 

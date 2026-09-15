@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mxreyer <236478497+mxreyer@users.noreply.github.com>
+Date: Tue, 15 Sep 2026 11:18:06 -0700
+Subject: [PATCH] winograd_fwd: store the transformed filters [C][N] so the
+ GEMM loads coalesce
+
+winconv_3x3 reads, per wave, one input channel of the transformed filter
+for 32 consecutive output features. With the [N][C] layout those 32 lanes
+read at a stride of C*64 bytes; on an AMD gfx1013 that alone was 39% of
+the forward kernel (measured by reading the wrong-but-coalesced address).
+Storing winconv_calc_gkgt_3x3's output [C][N] makes the read contiguous.
+
+Forward Winograd 24.4 -> 15.0 ms per ResNet-9 training step on gfx1013.
+---
+ src/kernels/winograd_fwd.cl | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/src/kernels/winograd_fwd.cl b/src/kernels/winograd_fwd.cl
+index df8e2de..9ba6f2d 100644
+--- a/src/kernels/winograd_fwd.cl
++++ b/src/kernels/winograd_fwd.cl
+@@ -171,7 +171,12 @@ __kernel void winconv_calc_gkgt_3x3(int N,int C,
+     if(n >= N || c>= C)
+         return;
+     float16 kern = load_3x3_kernel_and_transform(gk3 + (C * n + c) * 9);
+-    k4[C * n + c] = kern;
++    // Stored [c][n], not [n][c]: winconv_3x3 below reads one input channel for
++    // 32 consecutive output features per wave, so this layout makes that read
++    // contiguous. With [n][c] the 32 lanes read at a stride of C*64 bytes,
++    // which alone cost 39% of the forward kernel's time on an AMD gfx1013
++    // (measured by reading the wrong-but-coalesced address).
++    k4[N * c + n] = kern;
+ }
+ 
+ 
+@@ -334,7 +339,7 @@ void winconv_3x3(int B, int N,int C,int H,int W,
+         store_local(l_tile_ptr,l_tile_stride,my_tile);
+         
+         // load relevant kernel
+-        float16 my_kern = (l_feature < N && k+l_kern_k < C) ? kernels[l_feature * C + k + l_kern_k] : 0;
++        float16 my_kern = (l_feature < N && k+l_kern_k < C) ? kernels[(k + l_kern_k) * N + l_feature] : 0;
+         store_local(l_kern_ptr,l_kern_stride,my_kern);
+ 
+         barrier(CLK_LOCAL_MEM_FENCE);

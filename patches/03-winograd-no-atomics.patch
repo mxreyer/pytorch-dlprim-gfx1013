@@ -1,0 +1,437 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mxreyer <236478497+mxreyer@users.noreply.github.com>
+Date: Tue, 15 Sep 2026 11:16:53 -0700
+Subject: [PATCH] conv: Winograd backward kernels without atomic_addf where it
+ is emulated
+
+Both Winograd backward kernels accumulate through atomic_addf. On a device
+without a hardware fp32 atomic add that is the compare-and-swap loop in
+atomic.h, and it was 39% of the backward-filter kernel on an AMD gfx1013
+(measured by swapping it for a racy plain +=). That is every RDNA1/RDNA2
+GPU - llc lowers atomicrmw fadd to global_atomic_cmpswap for gfx1010-1036,
+global_atomic_add_f32 arrives with gfx11 - and the Intel path in atomic.h
+is also a CAS loop.
+
+The atomics only ever combined across K slices; within one slice each
+output element has exactly one writer. So:
+
+- backward-filter: with split-K each slice writes its own 9*C*N plane of
+  the workspace and winconv_3x3_bwd_filter_reduce sums the planes,
+  applying beta. The split is capped so the planes stay under 64 MB.
+- backward-data: the overlapping 4x4 input-gradient tiles fall into four
+  row/column parity classes whose members are disjoint, so each class
+  writes its own plane (4 planes appended to the existing workspace) and
+  winconv_3x3_bwd_data_reduce sums them, masking the border elements no
+  tile of a class reaches - which also removes the zero-fill/pre-scale
+  pass. Falls back to atomics above 256 MB of planes.
+
+The reduce costs under 2% of the kernel it replaces. Selected when the
+device is not NVIDIA and does not advertise cl_ext_float_atomics; the
+atomic paths are kept and used otherwise. ResNet-9 training on gfx1013:
+972 -> 1,374 img/s, gradients matching CPU references.
+---
+ src/core/conv.cpp                  | 143 ++++++++++++++++++++++++++---
+ src/kernels/winograd_bwd_data.cl   |  67 ++++++++++++++
+ src/kernels/winograd_bwd_filter.cl |  34 +++++++
+ 3 files changed, 229 insertions(+), 15 deletions(-)
+
+diff --git a/src/core/conv.cpp b/src/core/conv.cpp
+index 5ed03ea..01bad54 100644
+--- a/src/core/conv.cpp
++++ b/src/core/conv.cpp
+@@ -220,6 +220,16 @@ namespace core {
+     };
+ 
+ 
++    // Both Winograd backward kernels accumulate across work-groups with
++    // atomic_addf. Where the device has no hardware fp32 atomic add (atomic.h
++    // then expands it to a compare-and-swap loop) the kernels below instead
++    // write disjoint planes of the workspace and a small kernel sums them.
++    static bool has_native_atomic_addf(Context &ctx)
++    {
++        return ctx.is_nvidia()
++            || ctx.device_extensions().find("cl_ext_float_atomics") != std::string::npos;
++    }
++
+     class Conv2DForwardWinograd : public Conv2DForward {
+     public:
+         virtual char const *algo() const
+@@ -302,14 +312,21 @@ namespace core {
+         {
+             return "winograd";
+         }
+-        virtual size_t workspace()
+-        {
+-            return sizeof(float)*16 * config_.channels_in * config_.channels_out;
+-        }
+         Conv2DBackwardDataWinograd(Context &ctx,Conv2DSettings const &config) :
+             config_(config),
+             s_(ctx,config.dtype)
+         {
++            // Winograd backward-data accumulates because its 4x4 tiles overlap.
++            // Splitting the tiles into their four row/column parity classes
++            // makes the writes disjoint, at the cost of four planes of the
++            // gradient in the workspace. Fall back to atomics when the device
++            // has a native fp32 atomic add or the planes would be too large.
++            plane_elems_ = size_t(config.shape[0]) * config.channels_in
++                         * size_t(config.shape[2]) * size_t(config.shape[3]);
++            size_t budget = 256u << 20;
++            use_planes_ = !has_native_atomic_addf(ctx)
++                       && (4 * plane_elems_ * sizeof(float)) <= budget;
++
+             int off = ctx.is_amd() ? 0 : 1;
+             int toff = 1;
+             int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
+@@ -318,9 +335,23 @@ namespace core {
+                 toff = 0;
+             }
+             cl::Program const &prog = gpu::Cache::instance().get_program(ctx,"winograd_bwd_data",
+-                        "STRIDE_OFFSET",off,"TR_STRIDE_OFFSET",toff);
++                        "STRIDE_OFFSET",off,"TR_STRIDE_OFFSET",toff,
++                        "USE_PLANES",int(use_planes_));
+             conv_kernel_bwd_ = cl::Kernel(prog,"winconv_calc_gkgt_3x3");
+             bw_conv_data_ = cl::Kernel(prog,"winconv_3x3_bwd_data");
++            if(use_planes_)
++                reduce_ = cl::Kernel(prog,"winconv_3x3_bwd_data_reduce");
++        }
++        size_t filter_ws_elems() const
++        {
++            return size_t(16) * config_.channels_in * config_.channels_out;
++        }
++        virtual size_t workspace()
++        {
++            size_t elems = filter_ws_elems();
++            if(use_planes_)
++                elems += 4 * plane_elems_;
++            return sizeof(float) * elems;
+         }
+         virtual void enqueue(Tensor &dx,Tensor &K,Tensor &dy,Tensor &ws_bytes,float factor,ExecutionContext const &ec)
+         {
+@@ -335,7 +366,11 @@ namespace core {
+             int w = dx.shape()[3];
+ 
+             int p=0;
+-            Tensor ws = ws_bytes.workspace_as_type(float_data);
++            Tensor all_ws = ws_bytes.workspace_as_type(float_data);
++            Tensor ws = all_ws.sub_tensor(0,Shape(filter_ws_elems()),float_data);
++            Tensor planes;
++            if(use_planes_)
++                planes = all_ws.sub_tensor(filter_ws_elems(),Shape(4*plane_elems_),float_data);
+ 
+             conv_kernel_bwd_.setArg(p++,config_.channels_out);
+             conv_kernel_bwd_.setArg(p++,config_.channels_in);
+@@ -349,25 +384,53 @@ namespace core {
+             bw_conv_data_.setArg(p++,h);
+             bw_conv_data_.setArg(p++,w);
+ 
+-            dx.set_arg(bw_conv_data_,p);
++            if(use_planes_)
++                planes.set_arg(bw_conv_data_,p);
++            else
++                dx.set_arg(bw_conv_data_,p);
+             ws.set_arg(bw_conv_data_,p);
+             dy.set_arg(bw_conv_data_,p);
+             
+-            s_.enqueue(factor,dx,ec1);
++            // With planes there is nothing to pre-scale: the reduce applies
++            // beta and masks the border elements no tile of a parity class
++            // writes, so the planes need no zero-fill either.
++            if(!use_planes_)
++                s_.enqueue(factor,dx,ec1);
+ 
+             cl::NDRange l1(8,8);
+             cl::NDRange g1 = gpu::round_range(config_.channels_out,config_.channels_in,l1);
+-            ec.queue().enqueueNDRangeKernel(conv_kernel_bwd_,cl::NullRange,g1,l1,ec2.events(),ec2.event("winograd_3to4_kernel"));
++            // first launch of the series carries the incoming dependencies
++            ExecutionContext &ec_first = use_planes_ ? ec1 : ec2;
++            ec.queue().enqueueNDRangeKernel(conv_kernel_bwd_,cl::NullRange,g1,l1,ec_first.events(),ec_first.event("winograd_3to4_kernel"));
+ 
+             cl::NDRange l2(256,1);
+             int tiles = ((w + 1) / 2 * (h + 1) / 2 * B + 31)/32;
+             cl::NDRange g2(tiles * 256,(C + 31) / 32);
+-            ec.queue().enqueueNDRangeKernel(bw_conv_data_,cl::NullRange,g2,l2,ec.events(),ec2.event("winograd_3x3_main_bwd"));
++            ec.queue().enqueueNDRangeKernel(bw_conv_data_,cl::NullRange,g2,l2,
++                                            use_planes_ ? ec2.events() : ec.events(),
++                                            ec2.event("winograd_3x3_main_bwd"));
++
++            if(use_planes_) {
++                int total = int(plane_elems_);
++                int rp=0;
++                reduce_.setArg(rp++,total);
++                reduce_.setArg(rp++,h);
++                reduce_.setArg(rp++,w);
++                dx.set_arg(reduce_,rp);
++                planes.set_arg(reduce_,rp);
++                reduce_.setArg(rp++,factor);
++                size_t lr = 256;
++                size_t gr = (size_t(total) + lr - 1) / lr * lr;
++                ec.queue().enqueueNDRangeKernel(reduce_,cl::NullRange,cl::NDRange(gr),cl::NDRange(lr),
++                                                ec3.events(),ec3.event("winograd_3x3_main_bwd_reduce"));
++            }
+         }
+     private:
+         Conv2DSettings config_;
+         Scale s_;
+-        cl::Kernel conv_kernel_bwd_, bw_conv_data_;
++        cl::Kernel conv_kernel_bwd_, bw_conv_data_, reduce_;
++        bool use_planes_;
++        size_t plane_elems_;
+     };
+ 
+     class Conv2DBackwardFilterWinograd: public Conv2DBackwardFilter  {
+@@ -401,6 +464,18 @@ namespace core {
+             int k_work = config.shape[0] * ((h + 1) / 2) * ((w + 1) / 2);
+             while(k_split_ > 1 && k_work / k_split_ < 16)
+                 k_split_ /= 2;
++            // Without a native fp32 atomic add each split writes its own
++            // plane of the filter gradient to the workspace and a second pass
++            // sums them. Keep that bounded for wide layers: 9*C*N floats per
++            // split is 36 MB per split at C=N=1024.
++            use_split_planes_ = !has_native_atomic_addf(ctx);
++            if(use_split_planes_) {
++                size_t plane = size_t(9) * config_.channels_in
++                             * config_.channels_out * sizeof(float);
++                size_t budget = 64u << 20;
++                while(k_split_ > 1 && plane * size_t(k_split_) > budget)
++                    k_split_ /= 2;
++            }
+             reduce_k_ = k_split_ > 1;
+             int off = ctx.is_amd() ? 0 : 1;
+             int toff = 1;
+@@ -412,20 +487,38 @@ namespace core {
+             cl::Program const &prog = gpu::Cache::instance().get_program(ctx,"winograd_bwd_filter",
+                                                                             "IMG_H",h,"IMG_W",w,
+                                                                             "STRIDE_OFFSET",off,
+-                                                                            "TR_STRIDE_OFFSET",toff);
++                                                                            "TR_STRIDE_OFFSET",toff,
++                                                                            "USE_SPLIT_PLANES",int(use_split_planes_));
+             bw_conv_filter_ = cl::Kernel(prog,"winconv_3x3_bwd_filter");
++            if(k_split_ > 1 && use_split_planes_)
++                reduce_ = cl::Kernel(prog,"winconv_3x3_bwd_filter_reduce");
++        }
++        virtual size_t workspace()
++        {
++            if(k_split_ <= 1 || !use_split_planes_)
++                return 0;
++            return size_t(k_split_) * 9 * size_t(config_.channels_in)
++                 * size_t(config_.channels_out) * sizeof(float);
+         }
+-        virtual void enqueue(Tensor &x,Tensor &dK,Tensor &dy,Tensor &,float factor,ExecutionContext const &ec) 
++        virtual void enqueue(Tensor &x,Tensor &dK,Tensor &dy,Tensor &ws_bytes,float factor,ExecutionContext const &ec)
+         {
+             int B = x.shape()[0];
+             int N = config_.channels_out;
+             int C = config_.channels_in;
++            bool split = k_split_ > 1 && use_split_planes_;
++            Tensor partials;
++            if(split)
++                partials = ws_bytes.workspace_as_type(float_data);
++
+             int p=0;
+             bw_conv_filter_.setArg(p++,B);
+             bw_conv_filter_.setArg(p++,N);
+             bw_conv_filter_.setArg(p++,C);
+             x.set_arg(bw_conv_filter_,p);
+-            dK.set_arg(bw_conv_filter_,p);
++            if(split)
++                partials.set_arg(bw_conv_filter_,p);
++            else
++                dK.set_arg(bw_conv_filter_,p);
+             dy.set_arg(bw_conv_filter_,p);
+             bw_conv_filter_.setArg(p++,factor);
+             
+@@ -433,7 +526,25 @@ namespace core {
+             int g1 = 256 * ((C+31)/32);
+             int g2 = (N+31)/32;
+             cl::NDRange gr(g1,g2,k_split_);
+-            if(reduce_k_) {
++            if(split) {
++                ExecutionContext ec1 = ec.generate_series_context(0,2);
++                ExecutionContext ec2 = ec.generate_series_context(1,2);
++                ec.queue().enqueueNDRangeKernel(bw_conv_filter_,cl::NullRange,gr,wg,ec1.events(),ec1.event("winograd_bwd_filter"));
++
++                int total = 9 * C * N;
++                int rp=0;
++                reduce_.setArg(rp++,total);
++                reduce_.setArg(rp++,k_split_);
++                dK.set_arg(reduce_,rp);
++                partials.set_arg(reduce_,rp);
++                reduce_.setArg(rp++,factor);
++                size_t lr = 256;
++                size_t gr2 = (size_t(total) + lr - 1) / lr * lr;
++                ec.queue().enqueueNDRangeKernel(reduce_,cl::NullRange,cl::NDRange(gr2),cl::NDRange(lr),
++                                                ec2.events(),ec2.event("winograd_bwd_filter_reduce"));
++            }
++            else if(reduce_k_) {
++                // atomic accumulate across slices: dK must be pre-scaled
+                 ExecutionContext ec1 = ec.generate_series_context(0,2);
+                 ExecutionContext ec2 = ec.generate_series_context(1,2);
+                 s_.enqueue(factor,dK,ec1);
+@@ -447,7 +558,9 @@ namespace core {
+         Conv2DSettings config_;
+         Scale s_;
+         cl::Kernel bw_conv_filter_;
++        cl::Kernel reduce_;
+         bool reduce_k_;
++        bool use_split_planes_;
+         int k_split_;
+     };
+ 
+diff --git a/src/kernels/winograd_bwd_data.cl b/src/kernels/winograd_bwd_data.cl
+index b7746ba..ad7a122 100644
+--- a/src/kernels/winograd_bwd_data.cl
++++ b/src/kernels/winograd_bwd_data.cl
+@@ -219,6 +219,10 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+ #define TR_STRIDE_OFFSET 1
+ #endif
+ 
++#ifndef USE_PLANES
++#define USE_PLANES 0
++#endif
++
+ #if STRIDE_OFFSET > 0 || TR_STRIDE_OFFSET > 0
+ #define PADDING_FACTOR 1
+ #else
+@@ -381,7 +385,23 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+             int s_channel = wg_channel + s_row_t;
+ 
+             if(s_b < B && s_channel < C ) {
++#if USE_PLANES
++                // Winograd F(2x2,3x3) input-gradient tiles are 4x4 at stride 2,
++                // so four tiles touch every output pixel - which is why this
++                // accumulated through atomic_addf, a compare-and-swap retry loop
++                // on a device with no hardware fp32 atomic add. Tiles of equal
++                // row- and column-parity are 4 apart in each direction, so
++                // within one of the four parity classes the patches are exactly
++                // disjoint: each class gets its own plane, written with plain
++                // stores, and winconv_3x3_bwd_data_reduce sums the planes.
++                int s_tr = s_rc / half_W;
++                int s_tc = s_rc % half_W;
++                ulong s_plane = (ulong)(((s_tr & 1) << 1) | (s_tc & 1));
++                __global float *ptr = image + s_plane * ((ulong)B * C * H * W)
++                                    + ((s_b * C + s_channel) * H + s_row) * W + s_col;
++#else
+                 __global float *ptr = image + ((s_b * C + s_channel) * H + s_row) * W + s_col;
++#endif
+                 #pragma unroll
+                 for(int dr=0;dr<4;dr++,ptr+=W) {
+                     int r = s_row + dr;
+@@ -390,7 +410,11 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+                         for(int dc=0;dc<4;dc++) {
+                             int c = s_col + dc;
+                             if(c >= 0 && c < W) {
++#if USE_PLANES
++                                ptr[dc] = s_img_tile[dr][dc];
++#else
+                                 atomic_addf(ptr + dc,s_img_tile[dr][dc]);
++#endif
+                             }
+                         }
+                     }
+@@ -404,3 +428,46 @@ void winconv_3x3_bwd_data(int B, int N,int C,int H,int W,
+ }
+ 
+ 
++// Sum the four parity planes written above into the real input gradient.
++// dst = beta*dst + sum_{p=0..3} src[p]
++// A pixel is covered by two tiles along each axis (rows 2t-1..2t+2 overlap
++// by two), and those two tiles have opposite parity - except on the first
++// row/column, which only tile 0 (even) reaches, and on the last one when the
++// size is even, which only the last tile (odd) reaches. Elements of a plane
++// that no tile of its parity class writes are never initialised, so mask them
++// here instead of zero-filling 4 planes before every launch.
++inline int parity_mask(int r,int n)
++{
++    int half_n = (n + 1) / 2;
++    int t1 = (r + 1) / 2;          // tile whose rows 2*t1-1 .. 2*t1+2 hold r
++    int t0 = t1 - 1;
++    int m = 0;
++    if(t1 < half_n) m |= 1 << (t1 & 1);
++    if(t0 >= 0)     m |= 1 << (t0 & 1);
++    return m;
++}
++
++__kernel void winconv_3x3_bwd_data_reduce(
++                          int total,int H,int W,
++                          __global float *dst,ulong dst_offset,
++                          __global float const * restrict src,ulong src_offset,
++                          float beta)
++{
++    int i = get_global_id(0);
++    if(i >= total)
++        return;
++    dst += dst_offset;
++    src += src_offset;
++    int c = i % W;
++    int r = (i / W) % H;
++    int rm = parity_mask(r,H);
++    int cm = parity_mask(c,W);
++    ulong t = (ulong)total;
++    // plane index = (row parity << 1) | col parity
++    float s = 0;
++    if((rm & 1) && (cm & 1)) s += src[i];
++    if((rm & 1) && (cm & 2)) s += src[t + i];
++    if((rm & 2) && (cm & 1)) s += src[2*t + i];
++    if((rm & 2) && (cm & 2)) s += src[3*t + i];
++    dst[i] = (beta == 0) ? s : (dst[i] * beta + s);
++}
+diff --git a/src/kernels/winograd_bwd_filter.cl b/src/kernels/winograd_bwd_filter.cl
+index 095039b..94c4eb3 100644
+--- a/src/kernels/winograd_bwd_filter.cl
++++ b/src/kernels/winograd_bwd_filter.cl
+@@ -224,6 +224,10 @@ inline void store_local(__local float *l_val,int strd,float16 v)
+ #define TR_STRIDE_OFFSET 1
+ #endif
+ 
++#ifndef USE_SPLIT_PLANES
++#define USE_SPLIT_PLANES 0
++#endif
++
+ #if STRIDE_OFFSET > 0 || TR_STRIDE_OFFSET > 0
+ #define PADDING_FACTOR 1
+ #else
+@@ -382,10 +386,22 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+             transform_kernel_bwd(s_kern16,s_kern9);
+             __global float *ptr = kernels + 9* (kern_ch_in +  kern_ch_out * C);
+             if(reduce_k) {
++#if USE_SPLIT_PLANES
++                // Split-K writes its slice to a private plane of the workspace
++                // and winconv_3x3_bwd_filter_reduce sums them, instead of
++                // every slice fighting over the same element through an
++                // emulated atomic add.
++                ptr += (ulong)get_global_id(2) * 9 * (ulong)N * (ulong)C;
++                #pragma unroll
++                for(int i=0;i<9;i++) {
++                    ptr[i] = s_kern9[i];
++                }
++#else
+                 #pragma unroll
+                 for(int i=0;i<9;i++) {
+                     atomic_addf(ptr + i, s_kern9[i]);
+                 }
++#endif
+             }
+             else {
+                 #pragma unroll
+@@ -404,3 +420,21 @@ void winconv_3x3_bwd_filter(int B, int N,int C,
+ }
+ 
+ 
++// Sum the split-K planes written above into the real filter gradient.
++// dst = beta*dst + sum_k src[k]
++__kernel void winconv_3x3_bwd_filter_reduce(
++                          int total,int splits,
++                          __global float *dst,ulong dst_offset,
++                          __global float const *restrict src,ulong src_offset,
++                          float beta)
++{
++    int i = get_global_id(0);
++    if(i >= total)
++        return;
++    dst += dst_offset;
++    src += src_offset;
++    float s = 0;
++    for(int k=0;k<splits;k++)
++        s += src[(ulong)k * (ulong)total + i];
++    dst[i] = (beta == 0) ? s : (dst[i] * beta + s);
++}

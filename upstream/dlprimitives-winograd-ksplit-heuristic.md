@@ -44,9 +44,9 @@ k_split_ = wg >= target ? 1 : min(round_up(target, wg), k_available, 16);
 ```
 
 Targets of 8, 16 and 32 per CU measured the same as 4 on this device, so the
-constant is not sensitive. Patch (with env-var overrides for measurement) in
-`winograd_ksplit.patch`, https://github.com/mxreyer/pytorch-dlprim-gfx1013;
-the full measurements are in that repository's OPENCL-PERF.md, Finding 2.
+constant is not sensitive. Patch: `patches/02-winograd-ksplit-heuristic.patch`
+in https://github.com/mxreyer/pytorch-dlprim-gfx1013; the full measurements
+are in that repository's OPENCL-PERF.md, Finding 2.
 
 ## Disclosure
 

@@ -1,0 +1,370 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mxreyer <236478497+mxreyer@users.noreply.github.com>
+Date: Tue, 15 Sep 2026 11:24:55 -0700
+Subject: [PATCH] conv: BC-250 investigation knobs (local, not for upstream)
+
+Environment overrides used for the measurements in OPENCL-PERF.md:
+DLPRIM_CONV_ALGO / DLPRIM_CONV_{FWD,BWD_DATA,BWD_FILTER}_ALGO,
+DLPRIM_WINOGRAD_KSPLIT (incl. "stock" for the original rule),
+DLPRIM_WINOGRAD_KSPLIT_TARGET/MAX, DLPRIM_WINOGRAD_{SPLIT,BWD}_PLANES,
+DLPRIM_WINOGRAD_STRIDE_OFFSET/TR_OFFSET, and the DLPRIM_DEBUG_PARTIALS_HASH
+diagnostic that located the governor-voltage wrong-gradient issue.
+---
+ src/core/conv.cpp | 218 ++++++++++++++++++++++++++++++++++++++--------
+ 1 file changed, 181 insertions(+), 37 deletions(-)
+
+diff --git a/src/core/conv.cpp b/src/core/conv.cpp
+index dc07b4a..d3aa113 100644
+--- a/src/core/conv.cpp
++++ b/src/core/conv.cpp
+@@ -9,8 +9,14 @@
+ #include <dlprim/core/bias.hpp>
+ #include <dlprim/core/common.hpp>
+ #include <dlprim/gpu/gemm.hpp>
+-#include <dlprim/gpu/program_cache.hpp>
+ #include <cstdlib>
++#include <algorithm>
++#include <cstdio>
++#include <cstring>
++#include <vector>
++#include <cmath>
++#include <map>
++#include <dlprim/gpu/program_cache.hpp>
+ #include <iostream>
+ 
+ namespace dlprim {
+@@ -221,6 +227,7 @@ namespace core {
+     };
+ 
+ 
++
+     // Both Winograd backward kernels accumulate across work-groups with
+     // atomic_addf. Where the device has no hardware fp32 atomic add (atomic.h
+     // then expands it to a compare-and-swap loop) the kernels below instead
+@@ -231,17 +238,31 @@ namespace core {
+             || ctx.device_extensions().find("cl_ext_float_atomics") != std::string::npos;
+     }
+ 
++    // The atomics-free Winograd backward paths below (planes instead of emulated
++    // fp32 atomics) are on wherever has_native_atomic_addf() is false, i.e. on
++    // the BC-250. They spent two weeks behind an interlock
++    // because they showed a rare wrong gradient on the BC-250; that turned out
++    // to be the GPU clock governor's idle-floor voltage (1000 MHz at 718 mV),
++    // not the kernels and not the compiler - 66/100 sweeps bad pinned at that
++    // point, 0/900 with the voltage back at the shipped default. See
++    // OPENCL-PERF.md, Finding 3, in mxreyer/pytorch-dlprim-gfx1013.
++    // DLPRIM_WINOGRAD_BWD_PLANES=0 /
++    // DLPRIM_WINOGRAD_SPLIT_PLANES=0 select the atomic paths for comparison.
++    static bool env_enabled(char const *name,bool def)
++    {
++        char const *e = getenv(name);
++        return e && *e ? atoi(e) != 0 : def;
++    }
+     // DLPRIM_CONV_FP16=1: the three Winograd kernels keep their LDS tiles and
+     // run their register-tile GEMM in fp16 (packed v_pk_fma_f16, twice the
+     // fp32 rate on RDNA), with fp16 accumulation over one work-group's K
+-    // slice. Tensors in global memory stay fp32. Measured on an AMD gfx1013:
++    // slice. Tensors in global memory stay fp32. Measured on the BC-250:
+     // forward 15.0 -> 8.9 ms, backward-data 16.0 -> 10.2, backward-filter
+     // 19.4 -> 12.4 per ResNet-9 step; Y/dX within ~0.5% of fp32, dW ~0.5%
+     // with the shorter K slices below. Off by default: fp32 callers get fp32.
+     static bool conv_fp16()
+     {
+-        char const *e = getenv("DLPRIM_CONV_FP16");
+-        return e && *e && atoi(e) != 0;
++        return env_enabled("DLPRIM_CONV_FP16",false);
+     }
+ 
+     class Conv2DForwardWinograd : public Conv2DForward {
+@@ -302,6 +323,14 @@ namespace core {
+         {
+             int off = ctx.is_amd() ? 0 : 1;
+             int toff = 1;
++            // BC-250 investigation: STRIDE_OFFSET is the LDS padding that keeps
++            // rows off the same bank. Hardcoding it to 0 for AMD leaves the
++            // stride at XTILES_IN_WG*WG_K = 256 floats, an exact multiple of
++            // the 32 LDS banks. Overridable so the choice can be measured.
++            if(char const *e = getenv("DLPRIM_WINOGRAD_STRIDE_OFFSET"))
++                off = atoi(e);
++            if(char const *e = getenv("DLPRIM_WINOGRAD_TR_OFFSET"))
++                toff = atoi(e);
+             int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
+             if(local_mem_size < 40960) {
+                 off = 0;
+@@ -331,19 +360,30 @@ namespace core {
+             config_(config),
+             s_(ctx,config.dtype)
+         {
+-            // Winograd backward-data accumulates because its 4x4 tiles overlap.
+-            // Splitting the tiles into their four row/column parity classes
+-            // makes the writes disjoint, at the cost of four planes of the
+-            // gradient in the workspace. Fall back to atomics when the device
+-            // has a native fp32 atomic add or the planes would be too large.
++            // Winograd backward-data accumulates because its 4x4 tiles overlap,
++            // and on a device without a hardware fp32 atomic add that
++            // accumulation is a compare-and-swap retry loop. Splitting the
++            // tiles into their four row/column parity classes makes the writes
++            // disjoint, at the cost of four planes of the gradient in the
++            // workspace. Fall back to atomics when that would be too large.
+             plane_elems_ = size_t(config.shape[0]) * config.channels_in
+                          * size_t(config.shape[2]) * size_t(config.shape[3]);
++            // Default from has_native_atomic_addf() (see the note above
++            // env_enabled); the four planes must fit the workspace budget.
+             size_t budget = 256u << 20;
+-            use_planes_ = !has_native_atomic_addf(ctx)
++            use_planes_ = env_enabled("DLPRIM_WINOGRAD_BWD_PLANES",!has_native_atomic_addf(ctx))
+                        && (4 * plane_elems_ * sizeof(float)) <= budget;
+ 
+             int off = ctx.is_amd() ? 0 : 1;
+             int toff = 1;
++            // BC-250 investigation: STRIDE_OFFSET is the LDS padding that keeps
++            // rows off the same bank. Hardcoding it to 0 for AMD leaves the
++            // stride at XTILES_IN_WG*WG_K = 256 floats, an exact multiple of
++            // the 32 LDS banks. Overridable so the choice can be measured.
++            if(char const *e = getenv("DLPRIM_WINOGRAD_STRIDE_OFFSET"))
++                off = atoi(e);
++            if(char const *e = getenv("DLPRIM_WINOGRAD_TR_OFFSET"))
++                toff = atoi(e);
+             int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
+             if(local_mem_size < 40960) {
+                 off = 0;
+@@ -409,7 +449,7 @@ namespace core {
+             
+             // With planes there is nothing to pre-scale: the reduce applies
+             // beta and masks the border elements no tile of a parity class
+-            // writes, so the planes need no zero-fill either.
++            // writes (it used to need a zero-fill of all four planes here).
+             if(!use_planes_)
+                 s_.enqueue(factor,dx,ec1);
+ 
+@@ -462,32 +502,56 @@ namespace core {
+         {
+             int h = config.shape[2];
+             int w = config.shape[3];
+-            // Split the K (batch x tiles) reduction when the launch has too
+-            // few work-groups to fill the device. The previous rule compared
+-            // work-items, (C/32)*(N/32)*256, against estimated_core_count(),
+-            // which is CU*64 on AMD and CU*128 on NVIDIA, so it only split
+-            // below CU/4 (AMD) or CU/2 (NVIDIA) work-groups: on a 40-CU part a
+-            // 128->128 layer ran its 16 work-groups unsplit with 24 CUs idle.
+-            // Aim for ~4 work-groups per CU (8, 16 and 32 measured the same),
+-            // and never split a slice below 16 K items. With the fp16 inner
+-            // loop, shorter K slices halve the accumulation error (dW 1.1% ->
+-            // 0.5%) at no measured cost.
++            // --- BC-250 investigation -------------------------------------
++            // Stock rule: split the K (batch*tiles) reduction 8 ways only when
++            // (C/32)*(N/32)*256 < estimated_core_count(). On a 40 CU AMD part
++            // that is 2560 work items = 10 work-groups, so any conv with >=10
++            // work-groups runs unsplit -- including 128->128, which launches
++            // exactly 16 work-groups onto 40 CUs and leaves 24 idle.
++            // Pick the split from how many work-groups the launch actually has
++            // versus how many CUs there are to fill.
+             int wg_count = ((config_.channels_in + 31) / 32)
+                          * ((config_.channels_out + 31) / 32);
+             int cu = ctx.device().getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>();
+-            int per_cu = conv_fp16() ? 16 : 4, cap = conv_fp16() ? 64 : 16;
+-            int target = cu * per_cu;
+             k_split_ = 1;
+-            while(k_split_ < cap && wg_count * k_split_ < target)
+-                k_split_ *= 2;
+-            int k_work = config.shape[0] * ((h + 1) / 2) * ((w + 1) / 2);
+-            while(k_split_ > 1 && k_work / k_split_ < 16)
+-                k_split_ /= 2;
+-            // Without a native fp32 atomic add each split writes its own
+-            // plane of the filter gradient to the workspace and a second pass
+-            // sums them. Keep that bounded for wide layers: 9*C*N floats per
++            char const *ks_env = getenv("DLPRIM_WINOGRAD_KSPLIT");
++            if(ks_env && !strcmp(ks_env,"stock")) {
++                // reproduce the upstream rule, for A/B measurement
++                int winograd_work_items = (config_.channels_in / 32) * (config_.channels_out / 32) * 256;
++                k_split_ = (winograd_work_items < ctx.estimated_core_count()) ? 8 : 1;
++            }
++            else if(ks_env && *ks_env) {
++                k_split_ = atoi(ks_env);
++                if(k_split_ < 1)
++                    k_split_ = 1;
++            }
++            else {
++                // aim for >= 4 work-groups per CU so the tail is cheap. More
++                // splitting does not help (measured 2026-09-10: targets of 8,
++                // 16 and 32 per CU, caps to 64, all within noise of this), the
++                // kernel is not short of work-groups. Overridable for
++                // measurement: DLPRIM_WINOGRAD_KSPLIT_TARGET (per CU, default 4),
++                // DLPRIM_WINOGRAD_KSPLIT_MAX (cap, default 16).
++                // With the fp16 inner loop, shorter K slices halve the
++                // accumulation error (dW 1.1% -> 0.5%) at no measured cost.
++                int per_cu = conv_fp16() ? 16 : 4, cap = conv_fp16() ? 64 : 16;
++                if(char const *e = getenv("DLPRIM_WINOGRAD_KSPLIT_TARGET"))
++                    per_cu = std::max(1,atoi(e));
++                if(char const *e = getenv("DLPRIM_WINOGRAD_KSPLIT_MAX"))
++                    cap = std::max(1,atoi(e));
++                int target = cu * per_cu;
++                while(k_split_ < cap && wg_count * k_split_ < target)
++                    k_split_ *= 2;
++                // never split further than there is K work to split
++                int k_work = config.shape[0] * ((h + 1) / 2) * ((w + 1) / 2);
++                while(k_split_ > 1 && k_work / k_split_ < 16)
++                    k_split_ /= 2;
++            }
++            // Default from has_native_atomic_addf() (see the note above env_enabled).
++            use_split_planes_ = env_enabled("DLPRIM_WINOGRAD_SPLIT_PLANES",!has_native_atomic_addf(ctx));
++            // Each split needs its own plane of the filter gradient in the
++            // workspace. Keep that bounded for wide layers: 9*C*N floats per
+             // split is 36 MB per split at C=N=1024.
+-            use_split_planes_ = !has_native_atomic_addf(ctx);
+             if(use_split_planes_) {
+                 size_t plane = size_t(9) * config_.channels_in
+                              * config_.channels_out * sizeof(float);
+@@ -498,6 +562,14 @@ namespace core {
+             reduce_k_ = k_split_ > 1;
+             int off = ctx.is_amd() ? 0 : 1;
+             int toff = 1;
++            // BC-250 investigation: STRIDE_OFFSET is the LDS padding that keeps
++            // rows off the same bank. Hardcoding it to 0 for AMD leaves the
++            // stride at XTILES_IN_WG*WG_K = 256 floats, an exact multiple of
++            // the 32 LDS banks. Overridable so the choice can be measured.
++            if(char const *e = getenv("DLPRIM_WINOGRAD_STRIDE_OFFSET"))
++                off = atoi(e);
++            if(char const *e = getenv("DLPRIM_WINOGRAD_TR_OFFSET"))
++                toff = atoi(e);
+             int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
+             if(local_mem_size < 40960) {
+                 off = 0;
+@@ -513,6 +585,9 @@ namespace core {
+             if(k_split_ > 1 && use_split_planes_)
+                 reduce_ = cl::Kernel(prog,"winconv_3x3_bwd_filter_reduce");
+         }
++        // With split-K each slice writes its own plane of the workspace and a
++        // second pass sums them, instead of every slice fighting over the same
++        // filter element through an emulated atomic add.
+         virtual size_t workspace()
+         {
+             if(k_split_ <= 1 || !use_split_planes_)
+@@ -551,6 +626,49 @@ namespace core {
+                 ExecutionContext ec2 = ec.generate_series_context(1,2);
+                 ec.queue().enqueueNDRangeKernel(bw_conv_filter_,cl::NullRange,gr,wg,ec1.events(),ec1.event("winograd_bwd_filter"));
+ 
++                // DLPRIM_DEBUG_PARTIALS_HASH: the diagnostic that located the
++                // rare wrong dW. The partials must be bit-identical across runs
++                // with identical inputs; this reads them back and reports the
++                // first divergence. See OPENCL-PERF.md, Finding 3.
++                if(getenv("DLPRIM_DEBUG_PARTIALS_HASH")) {
++                    ec.queue().finish();
++                    size_t plane = 9 * size_t(C) * size_t(N);
++                    size_t n = size_t(k_split_) * plane;
++                    std::vector<float> host(n);
++                    ec.queue().enqueueReadBuffer(partials.device_buffer(),CL_TRUE,
++                        size_t(partials.device_offset())*sizeof(float),
++                        n*sizeof(float),host.data());
++                    static std::map<std::string,std::vector<float> > ref;
++                    char key[64];
++                    snprintf(key,sizeof key,"%d->%d/k%d",C,N,k_split_);
++                    auto it = ref.find(key);
++                    if(it == ref.end()) {
++                        ref[key] = host;
++                    }
++                    else if(host != it->second) {
++                        std::vector<float> const &r = it->second;
++                        size_t ndiff = 0, first = 0;
++                        std::vector<size_t> per(k_split_,0);
++                        double maxrel = 0;
++                        bool first_set = false;
++                        for(size_t i=0;i<n;i++) {
++                            if(host[i] != r[i]) {
++                                if(!first_set) { first = i; first_set = true; }
++                                ndiff++;
++                                per[i/plane]++;
++                                double d = std::fabs(double(host[i]) - double(r[i]));
++                                if(d > maxrel) maxrel = d;
++                            }
++                        }
++                        fprintf(stderr,"PARTIALS-DIFF %s: %zu of %zu differ; per-plane[",key,ndiff,n);
++                        for(int z=0;z<k_split_;z++) fprintf(stderr,"%zu%s",per[z],z+1<k_split_?",":"");
++                        size_t fi = first % plane;
++                        fprintf(stderr,"]; first idx=%zu (plane %zu, ch_out=%zu ch_in=%zu tap=%zu)",
++                                first, first/plane, (fi/9)/size_t(C), (fi/9)%size_t(C), fi%9);
++                        fprintf(stderr,"; got=%.6e want=%.6e maxdiff=%.3e\n",
++                                host[first], r[first], maxrel);
++                    }
++                }
+                 int total = 9 * C * N;
+                 int rp=0;
+                 reduce_.setArg(rp++,total);
+@@ -563,7 +681,7 @@ namespace core {
+                 ec.queue().enqueueNDRangeKernel(reduce_,cl::NullRange,cl::NDRange(gr2),cl::NDRange(lr),
+                                                 ec2.events(),ec2.event("winograd_bwd_filter_reduce"));
+             }
+-            else if(reduce_k_) {
++            else if(k_split_ > 1) {
+                 // atomic accumulate across slices: dK must be pre-scaled
+                 ExecutionContext ec1 = ec.generate_series_context(0,2);
+                 ExecutionContext ec2 = ec.generate_series_context(1,2);
+@@ -766,7 +884,7 @@ namespace core {
+             if(second_reduce_ > 1)
+                 reduce_ = cl::Kernel(prog,"reduce");
+         }
+-        virtual void enqueue(Tensor &x,Tensor &dK,Tensor &dy,Tensor &ws_bytes,float factor,ExecutionContext const &ec) 
++        virtual void enqueue(Tensor &x,Tensor &dK,Tensor &dy,Tensor &ws_bytes,float factor,ExecutionContext const &ec)
+         {
+             int kitems = dK.shape().total_size();
+             int batch = x.shape()[0];
+@@ -852,12 +970,36 @@ namespace core {
+             && config.pad[0] == 1;
+     }
+ 
++
++    // --- BC-250 investigation: runtime conv algorithm override ---------------
++    // The "auto" heuristics below are static: any 3x3/pad-1/stride-1 conv with
++    // >=8 channels gets Winograd, with no cost model and no per-device tuning.
++    // These env vars let the choice be measured instead of assumed.
++    //   DLPRIM_CONV_ALGO             - applies to all three directions
++    //   DLPRIM_CONV_FWD_ALGO         - forward only
++    //   DLPRIM_CONV_BWD_DATA_ALGO    - backward-data only
++    //   DLPRIM_CONV_BWD_FILTER_ALGO  - backward-filter only
++    // Values: auto | winograd | gemm | depthwise_separable
++    // An explicit algo passed by the caller always wins over the env var.
++    static std::string conv_algo_env(std::string const &algo,char const *var)
++    {
++        if(!(algo == "auto" || algo.empty()))
++            return algo;
++        char const *e = getenv(var);
++        if(!e)
++            e = getenv("DLPRIM_CONV_ALGO");
++        if(e && *e)
++            return e;
++        return algo;
++    }
++
+     std::unique_ptr<Conv2DForward> Conv2DForward::create(Context &ctx,
+                                                          Conv2DSettings const &config,
+                                                          bool bias,
+                                                          StandardActivations activation,
+-                                                         std::string const &algo)
++                                                         std::string const &algo_in)
+     {
++        std::string algo = conv_algo_env(algo_in,"DLPRIM_CONV_FWD_ALGO");
+         bool win = is_winograd_compatible(ctx,config);
+         bool dsc = is_depthwise_separable_compatible(config);
+ 
+@@ -878,8 +1020,9 @@ namespace core {
+         }
+         return r;
+     }
+-    std::unique_ptr<Conv2DBackwardData> Conv2DBackwardData::create(Context &ctx,Conv2DSettings const &config,std::string const &algo)
++    std::unique_ptr<Conv2DBackwardData> Conv2DBackwardData::create(Context &ctx,Conv2DSettings const &config,std::string const &algo_in)
+     {
++        std::string algo = conv_algo_env(algo_in,"DLPRIM_CONV_BWD_DATA_ALGO");
+         bool win = is_winograd_compatible(ctx,config);
+         bool dsc = is_depthwise_separable_compatible(config);
+ 
+@@ -900,8 +1043,9 @@ namespace core {
+         }
+         return r;
+     }
+-    std::unique_ptr<Conv2DBackwardFilter> Conv2DBackwardFilter::create(Context &ctx,Conv2DSettings const &config,std::string const &algo)
++    std::unique_ptr<Conv2DBackwardFilter> Conv2DBackwardFilter::create(Context &ctx,Conv2DSettings const &config,std::string const &algo_in)
+     {
++        std::string algo = conv_algo_env(algo_in,"DLPRIM_CONV_BWD_FILTER_ALGO");
+         bool win = is_winograd_compatible(ctx,config); // no need to test min channels in/out since it is more optimal in any case
+         bool dsc = is_depthwise_separable_compatible(config);
+ 

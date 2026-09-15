@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mxreyer <236478497+mxreyer@users.noreply.github.com>
+Date: Tue, 15 Sep 2026 11:14:34 -0700
+Subject: [PATCH] conv: pick the Winograd backward-filter split-K from
+ work-groups per CU
+
+The rule deciding whether to split the K reduction compared work-items,
+(C/32)*(N/32)*256, against estimated_core_count(), which is CU*64 on AMD
+and CU*128 on NVIDIA. So it only split when the launch had fewer than CU/4
+(AMD) or CU/2 (NVIDIA) work-groups, far below what fills the device, and
+the image size - how much K there is to split - never entered.
+
+On a 40-CU device the threshold was 10 work-groups: a 128->128 3x3 layer
+launches exactly 16, so it ran unsplit on 16 CUs with 24 idle for the
+whole kernel; 64->128 launches 8 and did split. A 40-SM T4 behaves the
+same way with its threshold at 20.
+
+Compare work-groups to compute units instead and aim for ~4 work-groups
+per CU (8, 16 and 32 per CU measured the same), capped at 16 and never
+splitting a slice below 16 K items. ResNet-9 training on an AMD gfx1013
+(batch 128, six 3x3 layers): backward-filter kernels 55.3 -> 46.1 ms per
+step, 909 -> 972 img/s, gradients unchanged to 1e-5 relative.
+
+ff2d590 described the previous rule as a workaround for a small HD530 not
+to use K reduction; if that was about the atomic accumulation rather than
+occupancy, the following change removes the atomics, otherwise the target
+may want to be vendor-specific.
+---
+ src/core/conv.cpp | 24 +++++++++++++++++++++---
+ 1 file changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/src/core/conv.cpp b/src/core/conv.cpp
+index b090e4c..5ed03ea 100644
+--- a/src/core/conv.cpp
++++ b/src/core/conv.cpp
+@@ -383,8 +383,25 @@ namespace core {
+         {
+             int h = config.shape[2];
+             int w = config.shape[3];
+-            int winograd_work_items = (config_.channels_in / 32) * (config_.channels_out / 32) * 256;
+-            reduce_k_ = winograd_work_items < ctx.estimated_core_count();
++            // Split the K (batch x tiles) reduction when the launch has too
++            // few work-groups to fill the device. The previous rule compared
++            // work-items, (C/32)*(N/32)*256, against estimated_core_count(),
++            // which is CU*64 on AMD and CU*128 on NVIDIA, so it only split
++            // below CU/4 (AMD) or CU/2 (NVIDIA) work-groups: on a 40-CU part a
++            // 128->128 layer ran its 16 work-groups unsplit with 24 CUs idle.
++            // Aim for ~4 work-groups per CU (8, 16 and 32 measured the same),
++            // and never split a slice below 16 K items.
++            int wg_count = ((config_.channels_in + 31) / 32)
++                         * ((config_.channels_out + 31) / 32);
++            int cu = ctx.device().getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>();
++            int target = cu * 4;
++            k_split_ = 1;
++            while(k_split_ < 16 && wg_count * k_split_ < target)
++                k_split_ *= 2;
++            int k_work = config.shape[0] * ((h + 1) / 2) * ((w + 1) / 2);
++            while(k_split_ > 1 && k_work / k_split_ < 16)
++                k_split_ /= 2;
++            reduce_k_ = k_split_ > 1;
+             int off = ctx.is_amd() ? 0 : 1;
+             int toff = 1;
+             int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
+@@ -415,7 +432,7 @@ namespace core {
+             cl::NDRange wg(256,1,1);
+             int g1 = 256 * ((C+31)/32);
+             int g2 = (N+31)/32;
+-            cl::NDRange gr(g1,g2,reduce_k_ ? 8 : 1);
++            cl::NDRange gr(g1,g2,k_split_);
+             if(reduce_k_) {
+                 ExecutionContext ec1 = ec.generate_series_context(0,2);
+                 ExecutionContext ec2 = ec.generate_series_context(1,2);
+@@ -431,6 +448,7 @@ namespace core {
+         Scale s_;
+         cl::Kernel bw_conv_filter_;
+         bool reduce_k_;
++        int k_split_;
+     };
+ 
+     struct DepthwiseSeparableBase {
