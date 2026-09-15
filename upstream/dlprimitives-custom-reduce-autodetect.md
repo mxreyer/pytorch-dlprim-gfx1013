@@ -5,11 +5,14 @@
 
 ## Summary
 
-On Mesa rusticl every kernel that reduces across a work-group — softmax,
+On an OpenCL 3.0 platform that does not implement the optional work-group
+collective functions, every kernel that reduces across a work-group — softmax,
 log-softmax, NLL loss, bias gradients, BatchNorm sums, global pooling — fails to
 compile with `use of undeclared identifier 'work_group_reduce_add'`. Plain
 matmul, elementwise and unbiased convolution work, so `pytorch_ocl` imports
-fine and then fails on the first loss.
+fine and then fails on the first loss. Seen on Mesa rusticl; clvk (#39)
+reports the same shape of platform (OpenCL 3.0, OpenCL C 1.2, no
+`__opencl_c_work_group_collective_functions`) and should hit it too.
 
 ## Cause
 
@@ -36,11 +39,17 @@ The `CUSTOM_REDUCE` fallback in `reduce.h` (a `__local` tree reduction with
 Query `CL_DEVICE_OPENCL_C_FEATURES` once per context, and when
 `__opencl_c_work_group_collective_functions` is absent (or the device is < 2.0),
 pass `-DCUSTOM_REDUCE=1` from `build_program`. That keeps the fast built-ins
-where they exist and makes every reduction kernel compile on rusticl — which is
-the OpenCL implementation for AMD hardware without ROCm support, for Intel
-integrated graphics on Mesa, and for Nouveau.
+where they exist and makes every reduction kernel compile on any conforming
+OpenCL 3.0 platform — rusticl (AMD hardware without ROCm support, Intel
+integrated graphics on Mesa, Nouveau) and clvk among them.
 
 Workaround in the meantime: `#define CUSTOM_REDUCE 1` in `reduce.h`
 (`custom_reduce.patch` in https://github.com/mxreyer/pytorch-dlprim-gfx1013).
 Measured cost on the BC-250 workload: none visible; reductions are a few
 percent of a ResNet-9 step.
+
+## Disclosure
+
+This report, and the patch, tools and measurements it cites, were produced
+with Claude (Anthropic) as the coding assistant; it drafted the text and most
+of the code. I reviewed the filing and take responsibility for its contents.

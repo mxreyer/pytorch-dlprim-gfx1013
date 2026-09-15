@@ -12,7 +12,11 @@ on `ocl:0`:
    `dlprimitives` convolution kernels are fp32-only; the half bytes go through
    unchecked. Fix: `TORCH_CHECK(input.scalar_type() == kFloat && weight.scalar_type() == kFloat, ...)`
    so it fails loudly like the other unsupported ops (matmul, pooling, softmax,
-   BatchNorm all raise).
+   BatchNorm all raise). The GEMM conv path already has this check in
+   `dlprimitives` (`GEMM::get_optimal_conv_gemm`, `DLPRIM_CHECK(dtype == float_data)` —
+   what #14 hits with `float64`), but `Conv2DForward::create` sends 3×3
+   convolutions with ≥8 channels to the Winograd path, which never checks the
+   dtype, so a half tensor reaches the kernel unchecked.
 
 2. **`hardtanh`, `hardtanh_`, `hardtanh_backward` and `clamp` do not compile
    for half.** The pointwise formulas mix the float scalar parameters with the
@@ -40,3 +44,9 @@ without its `dtype` define, so relu/tanh/sigmoid on half return garbage.)
 
 AMD BC-250 (gfx1013), Mesa rusticl 26.1.8 / 26.2.2, torch 2.4.0,
 `pytorch_ocl` 0.2.0 rebuilt from `1af48d4`.
+
+## Disclosure
+
+This report, and the patch, tools and measurements it cites, were produced
+with Claude (Anthropic) as the coding assistant; it drafted the text and most
+of the code. I reviewed the filing and take responsibility for its contents.

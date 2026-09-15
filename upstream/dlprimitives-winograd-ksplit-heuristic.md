@@ -47,3 +47,9 @@ Targets of 8, 16 and 32 per CU measured the same as 4 on this device, so the
 constant is not sensitive. Patch (with env-var overrides for measurement) in
 `winograd_ksplit.patch`, https://github.com/mxreyer/pytorch-dlprim-gfx1013;
 the full measurements are in that repository's OPENCL-PERF.md, Finding 2.
+
+## Disclosure
+
+This report, and the patch, tools and measurements it cites, were produced
+with Claude (Anthropic) as the coding assistant; it drafted the text and most
+of the code. I reviewed the filing and take responsibility for its contents.

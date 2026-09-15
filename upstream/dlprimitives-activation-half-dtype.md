@@ -34,3 +34,9 @@ inside the kernel, since the host passes a float. Patch: the `activation.cpp`
 / `activation.cl` hunks of `winograd_ksplit.patch` in
 https://github.com/mxreyer/pytorch-dlprim-gfx1013; `tools/act-half.py` there
 checks each activation on half against CPU.
+
+## Disclosure
+
+This report, and the patch, tools and measurements it cites, were produced
+with Claude (Anthropic) as the coding assistant; it drafted the text and most
+of the code. I reviewed the filing and take responsibility for its contents.

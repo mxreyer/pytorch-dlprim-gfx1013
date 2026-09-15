@@ -76,3 +76,9 @@ radeonsi, LLVM 22.1.8; `pytorch_dlprim` `1af48d4` with `dlprimitives`
 `ff2d590`. Correctness: `tools/wino-repro.py` (Y, dW, dX vs CPU over the six
 ResNet-9 shapes), `tools/bn-check.py`, `tools/odd-shapes.py` in the repository
 above.
+
+## Disclosure
+
+This report, and the patch, tools and measurements it cites, were produced
+with Claude (Anthropic) as the coding assistant; it drafted the text and most
+of the code. I reviewed the filing and take responsibility for its contents.
