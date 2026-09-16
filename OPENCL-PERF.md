@@ -41,7 +41,7 @@ looks like it is.
 | 1 | `fma()` compiles to a **563-instruction software emulation**, 120× slower than `mad()` | rusticl < 26.2 (never tells libclc the device has hardware fma) | fixed in our kernels (`02-gelu-mad.patch`); native on Mesa 26.2 |
 | 2 | Winograd backward-filter launches **16 work-groups onto 40 CUs** | dlprimitives heuristic | fixed (`patches/dlprimitives/02-winograd-ksplit-heuristic.patch`) |
 | 3 | Both backward kernels run on **emulated float atomics** — a third of the training step. Removing them is worth **+46%**. The "ACO `s_waitcnt` bug" that kept the fix gated for two weeks was the **clock governor's idle-floor undervolt** (1000 MHz @ 718 mV) | half silicon, half `dlprimitives`, then a config file | **fixed and shipping**: 1,374 img/s, no driver flags; voltage restored to the governor default |
-| 4 | rusticl **misreports** LDS and cache as absent | rusticl device info | reports drafted in `upstream/`; no impact on this stack |
+| 4 | rusticl **misreports** LDS and cache as absent | rusticl device info | no impact on this stack; not pursued |
 | 5 | Throttling / launch overhead / memory bandwidth / wrong conv algorithm | — | **all ruled out** |
 | 6 | The remaining gap is **the backward passes**, running at half the forward pass's efficiency; a T4 reaches 64% of its paper number where this reached 21.6% at the time (45.7% now) | `dlprimitives` kernels | measured (this corrects an earlier wrong conclusion) |
 | 7 | Wave size is per-kernel, and rusticl picks one globally: `AMD_DEBUG=w32cs` is **+13% on GEMM, −5% on this conv workload** | rusticl / radeonsi | measured; matters for matmul-heavy work |
@@ -694,8 +694,11 @@ The cache sweep (`ocl-micro cache`), read bandwidth against working-set size:
   262144 KiB      300.5 GB/s
 ```
 
-Bug-report drafts for both, with the measurements and reproducers, are in
-`upstream/rusticl-local-mem-type.md` and `upstream/rusticl-global-mem-cache.md`.
+Both values are constants in `rusticl/api/device.rs` (the local-memory one
+behind a TODO from the 2020 initial drop; the cache ones inherited from
+clover) — Gallium has no cap for either. Not pursued: nothing in this stack
+reads them, and the one program known to act on `CL_DEVICE_LOCAL_MEM_TYPE`
+is hashcat.
 
 Neither one hurts this stack: `dlprimitives` reads `CL_DEVICE_LOCAL_MEM_SIZE`
 (correctly reported as 64 KiB) and `CL_DEVICE_MAX_MEM_ALLOC_SIZE`, but never the

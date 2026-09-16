@@ -89,8 +89,7 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
    and the activation `dtype` bug (small, unambiguous), plus a proposal for
    the atomics-free paths / access patterns / prefetch that needs the
    author's numbers on NVIDIA and Intel; for `pytorch_dlprim` the half-tensor
-   fixes; for Mesa the two rusticl device-info misreports (hardcoded in
-   `rusticl/api/device.rs`, not a radeonsi problem). Checked 2026-09-15:
+   fixes. Checked 2026-09-15:
    nothing related is filed anywhere, and the `dlprimitives` series applies
    cleanly to upstream HEAD (`b176c15`). Two things about the `dlprimitives`
    maintainer worth knowing: PR #42, AI-generated, was closed after a "who
