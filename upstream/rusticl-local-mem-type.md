@@ -41,8 +41,7 @@ A kernel reading a `__local` array versus the same access pattern against a
 | `__global` read (512 MiB working set) | 359 GB/s |
 
 That is ~122 B/clk/WGP — the hardware LDS figure, not something a
-global-memory emulation can produce. Reproducer: `tools/ocl-micro.c` in
-https://github.com/mxreyer/pytorch-dlprim-gfx1013, tests `lds` and `bw`.
+global-memory emulation can produce.
 
 ## Why it matters
 

@@ -42,9 +42,6 @@ Streaming read bandwidth against working-set size (best of 3, full clock):
    32768 KiB      327 GB/s   <- DRAM
 ```
 
-Reproducer: `tools/ocl-micro.c` in
-https://github.com/mxreyer/pytorch-dlprim-gfx1013, test `cache`.
-
 ## Why it matters
 
 These three queries are the standard input to cache blocking. A library that

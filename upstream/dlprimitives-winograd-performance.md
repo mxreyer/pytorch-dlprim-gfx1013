@@ -76,9 +76,11 @@ you want it as an option; no argument for it being the default.
 
 AMD BC-250 (gfx1013, 40 CU, 2.0 GHz), Mesa 26.1.8 and 26.2.2 rusticl on
 radeonsi, LLVM 22.1.8; `pytorch_dlprim` `1af48d4` with `dlprimitives`
-`ff2d590`. Correctness: `tools/wino-repro.py` (Y, dW, dX vs CPU over the six
-ResNet-9 shapes), `tools/bn-check.py`, `tools/odd-shapes.py` in the repository
-above.
+`ff2d590`. Correctness: Y, dW and dX compared against CPU over the six
+ResNet-9 3x3 shapes (900 sweeps, all within 1e-5 relative), BatchNorm
+forward and backward within 7e-7 of CPU, and backward-data checked on odd
+spatial sizes, 1–2 pixel images and gradient accumulation (beta = 1) for the
+plane border masks.
 
 ## Disclosure
 

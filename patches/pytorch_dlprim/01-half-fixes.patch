@@ -1,5 +1,5 @@
 diff --git a/src/pointwise_ops.cpp b/src/pointwise_ops.cpp
-index 5503148..0a6e519 100644
+index 5503148..a04a239 100644
 --- a/src/pointwise_ops.cpp
 +++ b/src/pointwise_ops.cpp
 @@ -565,7 +565,7 @@ using c10::DeviceType;
@@ -47,18 +47,17 @@ index 5503148..0a6e519 100644
              dlprim::core::pointwise_operation({X},{Y},{min->to<double>()},"y0 = max(w0,x0);",q);
          else if(max)
 diff --git a/src/vision_ops.cpp b/src/vision_ops.cpp
-index 1358b5c..d24bc91 100644
+index 1358b5c..f0f62bb 100644
 --- a/src/vision_ops.cpp
 +++ b/src/vision_ops.cpp
-@@ -69,6 +69,11 @@ using c10::DeviceType;
+@@ -69,6 +69,10 @@ using c10::DeviceType;
                                      int64_t groups)
      {
          GUARD;
 +        // dlprimitives' convolution kernels are fp32 only; a half tensor used
 +        // to go through as raw bytes and come back as NaN. Fail loudly.
 +        TORCH_CHECK(input.scalar_type() == c10::kFloat && weight.scalar_type() == c10::kFloat,
-+                    "ocl convolution supports float32 tensors only (got ", input.scalar_type(),
-+                    "). For fp16 arithmetic on float32 tensors set DLPRIM_CONV_FP16=1.");
++                    "ocl convolution supports float32 tensors only (got ", input.scalar_type(), ")");
          Tensor X_tmp = input.contiguous();
          dlprim::Tensor X = todp(X_tmp);
          dlprim::Tensor W = todp(weight);
