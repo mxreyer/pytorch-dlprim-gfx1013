@@ -14,8 +14,9 @@ CL_DEVICE_GLOBAL_MEM_CACHE_SIZE => v.write::<cl_ulong>(0),
 CL_DEVICE_GLOBAL_MEM_CACHELINE_SIZE => v.write::<cl_uint>(0),
 ```
 
-On gfx1013 (AMD BC-250, Cyan Skillfish, radeonsi) the device has a cache of
-roughly 2 MB that delivers about 2.5× DRAM bandwidth.
+These are the same constants clover returned. On gfx1013 (AMD BC-250, Cyan
+Skillfish, radeonsi) the device has a cache of roughly 2 MB that delivers
+about 2.5× DRAM bandwidth.
 
 ## Environment
 
@@ -44,10 +45,10 @@ Streaming read bandwidth against working-set size (best of 3, full clock):
 
 ## Why it matters
 
-These three queries are the standard input to cache blocking. A library that
-sizes tiles from `CL_DEVICE_GLOBAL_MEM_CACHE_SIZE` gets 0 and cannot block;
-`CL_NONE` states affirmatively that there is nothing to block for, which is
-worse than declining to answer.
+These three queries are what a program has to size cache blocking from. A
+program that reads `CL_DEVICE_GLOBAL_MEM_CACHE_SIZE` gets 0 (hashcat reads it;
+John the Ripper prints it), and `CL_NONE` states affirmatively that there is
+nothing to block for, which is worse than declining to answer.
 
 ## Expected
 

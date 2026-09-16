@@ -13,6 +13,9 @@ driver or hardware (`src/gallium/frontends/rusticl/api/device.rs`, `main`):
 CL_DEVICE_LOCAL_MEM_TYPE => v.write::<cl_device_local_mem_type>(CL_GLOBAL),
 ```
 
+The TODO dates from the initial code drop (2020) and has stayed as is in
+every release; clover answered `CL_LOCAL` for the same query.
+
 `CL_GLOBAL` means `__local` memory is emulated in global memory. On gfx1013
 (AMD BC-250, Cyan Skillfish, radeonsi) the device has real on-chip LDS, and it
 measures 13.7× faster than global memory. `CL_DEVICE_LOCAL_MEM_SIZE` is
@@ -45,11 +48,12 @@ global-memory emulation can produce.
 
 ## Why it matters
 
-`CL_LOCAL_MEM_TYPE == CL_GLOBAL` is the documented signal that `__local` buys
-nothing, and OpenCL BLAS/DNN libraries that auto-tune read it to decide whether
-to use a tiled algorithm at all. On any GPU with dedicated shared memory —
-which is every radeonsi, iris and nouveau device — that decision is exactly
-backwards.
+`CL_GLOBAL` is the documented signal that `__local` is emulated and buys
+nothing. hashcat acts on it: with `CL_LOCAL` it defines `REAL_SHM` and puts
+its AES and Whirlpool S-box tables in `__local`, otherwise in `__constant`
+(`OpenCL/inc_vendor.h`), so on rusticl every AES-based mode does its table
+lookups from constant memory instead of LDS. On any GPU with dedicated shared
+memory — every radeonsi, iris and nouveau device — that choice is backwards.
 
 ## Expected
 
