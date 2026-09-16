@@ -35,15 +35,9 @@ on `ocl:0`:
    `grad_output.contiguous()` first.
 
 Patch: `patches/pytorch_dlprim/01-half-fixes.patch` in
-https://github.com/mxreyer/pytorch-dlprim-gfx1013. With it, hardtanh, relu6
-and clamp on half match CPU exactly, forward and backward, except at the
-exact clamp boundaries — and that is a separate, dtype-independent
-difference: `hardtanh_backward`'s formula is inclusive (`w0 <= x0 && x0 <= w1`)
-where PyTorch's CPU kernel is exclusive, so `x == min` or `x == max` gets
-gradient 1 on `ocl` and 0 on CPU, for float32 too. Not addressed by the
-patch. (The matching `dlprimitives` issue: `activation.cl` is built without
-its `dtype` define, so relu, tanh and sigmoid on half return garbage until
-that is fixed too.)
+https://github.com/mxreyer/pytorch-dlprim-gfx1013. (The matching
+`dlprimitives` issue: `activation.cl` is built without its `dtype` define, so
+relu, tanh and sigmoid on half return garbage until that is fixed too.)
 
 ## Environment
 
