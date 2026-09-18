@@ -9,18 +9,20 @@ Three problems found while inventorying which `torch.float16` operations work
 on `ocl:0`:
 
 1. **`convolution_overrideable` accepts a half tensor and returns NaN.** The
-   `dlprimitives` convolution kernels are fp32-only; the half bytes go through
-   unchecked. Fix: `TORCH_CHECK(input.scalar_type() == kFloat && weight.scalar_type() == kFloat, ...)`
-   so it fails loudly like the other unsupported ops (matmul, pooling, softmax,
-   BatchNorm all raise). The GEMM conv path already has this check in
-   `dlprimitives` (`GEMM::get_optimal_conv_gemm`, `DLPRIM_CHECK(dtype == float_data)` —
-   what #14 hits with `float64`), but `Conv2DForward::create` sends 3×3
-   convolutions with ≥8 channels to the Winograd path, which never checks the
-   dtype, so a half tensor reaches the kernel unchecked.
+   `dlprimitives` convolution kernels are fp32-only, and nothing checks, so the
+   half bytes are read as floats and the result is silently wrong. The GEMM
+   convolution path does check inside `dlprimitives`
+   (`GEMM::get_optimal_conv_gemm`, `DLPRIM_CHECK(dtype == float_data)` — what
+   #14 hits with `float64`), but `Conv2DForward::create` sends 3×3
+   convolutions with ≥8 channels to the Winograd path, which never looks at
+   the dtype. Fix:
+   `TORCH_CHECK(input.scalar_type() == kFloat && weight.scalar_type() == kFloat, ...)`
+   so it fails loudly like the other unsupported ops — matmul, pooling,
+   softmax and BatchNorm all raise already.
 
 2. **`hardtanh`, `hardtanh_`, `hardtanh_backward` and `clamp` do not compile
    for half.** The pointwise formulas mix the float scalar parameters with the
-   `dtype` operand:
+   `dtype` operand, which leaves the overload ambiguous:
 
    ```c
    y0=max(w0,min(w1,x0));      // w0, w1 float; x0 half -> ambiguous overload
@@ -31,8 +33,8 @@ on `ocl:0`:
    more formulas in `pointwise_ops.cpp` with the same pattern.
 
 3. **`hardtanh_backward` passes a non-contiguous `grad_output` to
-   `todp()`.** After `y.sum().backward()` the gradient is an expanded tensor;
-   `grad_output.contiguous()` first.
+   `todp()`.** After `y.sum().backward()` the gradient is an expanded tensor,
+   so it needs `grad_output.contiguous()` first.
 
 Patch: `patches/pytorch_dlprim/01-half-fixes.patch` in
 https://github.com/mxreyer/pytorch-dlprim-gfx1013. (The matching

@@ -36,6 +36,14 @@ has the T4 runs):
 Accuracy is unchanged throughout. Gradients match CPU references on every
 ResNet-9 layer shape.
 
+The two patched rows were measured together on 2026-09-18 in `scratch/venv`;
+the stock row and the T4 are from 2026-09-15 in the notebook image. Absolute
+figures move between environments — the benchmark prepares its images on the
+CPU, which starts to matter once the GPU is fast (the fp16 rows read
+2,987 / 10,279 in that session) — so judge a patch by a pair measured
+together. For the newest one that pair is 1,993 → 2,244 training and
+6,732 → 6,774 inference: the same binary, one `#define` apart.
+
 | file | description |
 | --- | --- |
 | [OPENCL-PERF.md](OPENCL-PERF.md) | Claude's full investigation: every measurement, dead end and fix. Long by design; the reference for anyone continuing this work. |
@@ -58,34 +66,37 @@ take them); `10` is local only. img/s is the ResNet-9 training step at batch
 
 | patch | what | report in `upstream/` | img/s after |
 | --- | --- | --- | ---: |
-| `00-custom-reduce` | Portable work-group reduction instead of the OpenCL 2.0 built-ins rusticl lacks; without it softmax, cross-entropy, bias gradients and BatchNorm sums fail to compile | custom-reduce-autodetect | — |
-| `01-activation-dtype` | Build the activation kernel with the tensor's dtype; relu/tanh/sigmoid/relu6 on half returned garbage | activation-half-dtype | 915 (stock) |
-| `02-winograd-ksplit-heuristic` | Split-K from work-groups per CU; the old rule left 24 of 40 CUs idle on 128→128 | winograd-ksplit-heuristic | 984 |
-| `03-winograd-no-atomics` | Backward kernels write disjoint planes and a small kernel sums them, instead of emulated fp32 atomics | winograd-performance §1 | 1,477 |
-| `04-winograd-fwd-filter-layout` | Transformed filters stored `[C][N]` so the 32 lanes read contiguously | winograd-performance §2 | 1,634 |
-| `05-winograd-bwd-filter-loads` | Lanes mapped to neighbouring tiles of one plane; vector loads on edge tiles | winograd-performance §2 | 1,815 |
-| `06-bn-sums-grid-stride` | Grid-stride BatchNorm reduction instead of one that hit the same cache sets every step | winograd-performance §2 | 1,949 |
-| `07-winograd-prefetch` | Next K step's tiles loaded into registers before the current GEMM | winograd-performance §3 | 2,068 |
-| `08-winograd-fp16` | Opt-in fp16 LDS tiles and packed-fp16 GEMM, fp32 tensors in memory | winograd-performance §4 | 2,062; 2,886 with `DLPRIM_CONV_FP16=1` |
-| `09-winograd-tr-offset` | Transpose-stage LDS padding dropped in the backward kernels, where it was costing a resident work-group per CU; forward keeps it | winograd-lds-padding | 2,330 |
+| `00-custom-reduce` | Adds values across a work-group the portable way, since rusticl lacks the OpenCL 2.0 built-in for it; without this, softmax, cross-entropy, bias gradients and BatchNorm sums do not compile at all | custom-reduce-autodetect | — |
+| `01-activation-dtype` | Builds the activation kernel for the tensor's own type; relu/tanh/sigmoid/relu6 on a half tensor were reading it as float and returning garbage | activation-half-dtype | 915 (stock) |
+| `02-winograd-ksplit-heuristic` | Decides how far to split the backward-filter work by counting work-groups per compute unit; the old rule left 24 of 40 CUs idle on a 128→128 layer | winograd-ksplit-heuristic | 984 |
+| `03-winograd-no-atomics` | Gives each parallel slice its own scratch plane and sums the planes afterwards, instead of every slice fighting over the same memory through emulated float atomics | winograd-performance §1 | 1,477 |
+| `04-winograd-fwd-filter-layout` | Stores the transformed filters `[C][N]`, so neighbouring lanes read neighbouring addresses | winograd-performance §2 | 1,634 |
+| `05-winograd-bwd-filter-loads` | Points the 32 lanes at neighbouring tiles of one image plane rather than at 32 different planes; vector loads on the edge tiles | winograd-performance §2 | 1,815 |
+| `06-bn-sums-grid-stride` | Spreads the BatchNorm sum across memory instead of walking it in per-lane chunks that hit the same cache sets every step | winograd-performance §2 | 1,949 |
+| `07-winograd-prefetch` | Starts the next slice's loads before the current slice's arithmetic, so the wait for memory overlaps with work | winograd-performance §3 | 2,068 |
+| `08-winograd-fp16` | Opt-in: half-precision tiles and multiply-accumulate inside the kernel, fp32 tensors in memory | winograd-performance §4 | 2,062; 2,886 with `DLPRIM_CONV_FP16=1` |
+| `09-winograd-tr-offset` | Drops the scratch-tile padding in the backward kernels, where the 8 KiB it costs was worth a second resident work-group per CU; forward keeps it | winograd-lds-padding | 2,330 |
 | `10-local-knobs` | The environment variables and the partials-hash diagnostic used for the measurements | — | 2,330 |
 
 **`patches/pytorch_dlprim/`** — the extension itself.
 
 | patch | what |
 | --- | --- |
-| `01-half-fixes` | Reject non-float32 in convolution (it silently returned NaN); dtype-correct hardtanh/relu6/clamp; contiguous grad in `hardtanh_backward`. Report: pytorch_dlprim-half-tensor-fixes. |
+| `01-half-fixes` | Makes convolution reject anything but float32 instead of silently returning NaN; fixes hardtanh/relu6/clamp for half tensors; makes the gradient contiguous in `hardtanh_backward`. Report: pytorch_dlprim-half-tensor-fixes. |
 | `02-gelu-mad` | `fma()` → `mad()` in GELU backward. On Mesa < 26.2 rusticl's `fma()` is a 563-instruction software emulation (3.8× on GELU backward). Redundant but harmless on 26.2+. |
 
 ### Why the reduction fails to compile
 
-`dlprimitives`' reduction kernels call `work_group_reduce_add()` /
-`work_group_reduce_max()`. rusticl does not implement that OpenCL C feature
-(`__opencl_c_work_group_collective_functions` is absent from
-`CL_DEVICE_OPENCL_C_FEATURES`, and no libclc build contains them), so the
-kernels fail with "use of undeclared identifier". `dlprimitives` already has a
-fallback using `__local` memory and `barrier()` behind `CUSTOM_REDUCE`;
-`00-custom-reduce` simply turns it on. `tools/libclc-probe.c` checks the feature directly.
+Softmax, cross-entropy, bias gradients and BatchNorm all need to add up one
+value across all 256 work-items of a group. `dlprimitives` does that with
+`work_group_reduce_add()`, a built-in that OpenCL 2.0 required and OpenCL 3.0
+made optional. rusticl does not provide it — the feature is missing from
+`CL_DEVICE_OPENCL_C_FEATURES` and no libclc build contains it — so those
+kernels fail to compile with "use of undeclared identifier".
+
+`dlprimitives` already carries a portable fallback that computes the same sum
+through shared memory and a barrier, behind `CUSTOM_REDUCE`; `00-custom-reduce`
+turns it on. `tools/libclc-probe.c` checks the feature directly.
 
 ### What the convolution patches do
 
@@ -93,36 +104,57 @@ Convolution is 89% of a ResNet-9 training step, and three quarters of that is
 the backward pass, so that is where the work went. In the order the series
 applies them:
 
-- **Occupancy** (`02`). The split-K heuristic for Winograd backward-filter
-  compared work-items to cores, so a 128→128 layer ran 16 work-groups on 40
-  CUs. Now it aims for ~4 work-groups per CU.
-- **Atomics** (`03`). Split-K slices accumulated into the filter gradient with
-  `atomic_addf`, which on a GPU without a hardware fp32 atomic add is a
-  compare-and-swap loop — 39% of the kernel. Each slice now writes its own
-  plane and a small kernel sums them. Same trick for backward-data (four
-  parity planes). Selected when the device is not NVIDIA and lacks
-  `cl_ext_float_atomics`; the atomic path stays for the rest.
-- **Access patterns** (`04`, `05`, `06`). Transformed filters stored `[C][N]`
-  so 32 lanes read contiguously; backward-filter lanes mapped to neighbouring
-  tiles of one plane with vector loads on the edges; a grid-stride BatchNorm
-  reduction instead of one that hit the same cache sets every step.
-- **Prefetch** (`07`). Each Winograd kernel loads the next K step's tiles
-  before the current GEMM.
-- **fp16 inner loop, opt-in** (`08`). Tiles converted to fp16 on the way into
-  LDS, packed `v_pk_fma_f16` GEMM, fp32 tensors in memory. Y/dX/dW within
-  ~0.5% of fp32 — about 10× looser than NVIDIA's TF32 default, which is why
-  it is not the default.
-- **LDS residency** (`09`). Any non-zero padding offset makes the kernels
-  allocate 16 extra tile rows — 40 KiB per work-group instead of 32 — and a
-  40 KiB work-group has a whole CU to itself where a 32 KiB one shares with a
-  second (`tools/ocl-micro.c occ` measures this). The two backward kernels are
-  better off unpadded; the forward kernel is not, and keeps its padding.
+- **Occupancy** (`02`). The backward-filter kernel can cut its work into
+  slices and spread them over more of the GPU, and a rule decides when that is
+  worth doing. The rule compared a count of *work-items* against a core count,
+  which on a 40-CU AMD device works out as "split only if there are fewer than
+  10 work-groups". A 128→128 layer launches 16, so it ran on 16 compute units
+  with 24 idle. It now counts work-groups and aims to give each CU about four.
+- **Atomics** (`03`). Both backward kernels have many work-groups adding into
+  the same output values, so they used an atomic add to keep those additions
+  from stepping on each other. This GPU has no hardware float atomic add —
+  RDNA1 and RDNA2 don't, it arrives with RDNA3 — so each one becomes a retry
+  loop: read the value, add to it, try to write it back, start over if another
+  lane got there first. That loop was 39% of the backward-filter kernel. But
+  the atomics were only guarding collisions *between* the parallel slices;
+  inside one slice every output has exactly one writer. Each slice now writes
+  into its own plane of scratch memory and a small second kernel adds the
+  planes together, for under 2% of the kernel it replaces. Backward-data gets
+  the same treatment: its 4×4 tiles do overlap, but sorting them by whether
+  their row and column are odd or even gives four groups whose members never
+  touch. Devices with a real float atomic add (NVIDIA, or anything advertising
+  `cl_ext_float_atomics`) keep the original path, where atomics are cheap.
+- **Access patterns** (`04`, `05`, `06`). Three places where neighbouring
+  lanes read far-apart addresses, so each read pulled in a cache line to use a
+  few bytes of it. The transformed filters are now stored `[C][N]`, which makes
+  the 32 lanes that read one input channel contiguous; backward-filter lanes
+  now map to neighbouring tiles of one image plane instead of to 32 different
+  planes, with vector loads on the edges; and the BatchNorm sum walks memory
+  with a stride rather than in per-lane chunks that kept landing in the same
+  cache sets (13 GB/s out of 359).
+- **Prefetch** (`07`). Each kernel used to load a slice of data, wait for it,
+  multiply, then load the next. It now issues the next slice's loads *before*
+  doing the current multiply, so the wait for memory overlaps with arithmetic
+  instead of stalling on it.
+- **fp16 inner loop, opt-in** (`08`). Tiles are converted to half on the way
+  into shared memory and multiplied two at a time; the tensors in memory stay
+  fp32. Y/dX/dW land within ~0.5% of the fp32 result — about 10× looser than
+  NVIDIA's TF32 default, which is why it is opt-in rather than on.
+- **Scratch padding** (`09`). The kernels pad their tiles in shared on-chip
+  memory (LDS, the thing every `_OFFSET` knob below is about) so that rows do
+  not land on the same memory bank. The catch: switching any
+  padding on also makes the kernel allocate 16 extra tile rows — 40 KiB per
+  work-group instead of 32 — and that is just over the line where two
+  work-groups fit on a compute unit at once, so the padding was costing half
+  the parallelism (`tools/ocl-micro.c occ` measures the boundary). Giving it
+  up to win the second work-group back pays off in the two backward kernels
+  and does not in the forward one, which keeps its padding.
 
 Each step was found by profiling and confirmed by first timing a
 wrong-but-cheap variant; the measurements are in OPENCL-PERF.md, Findings 2,
 3, 10, 11, 12 and 13. The benchmark table at the top (real data, 16 epochs,
-CPU-side augmentation) and the per-patch table (synthetic step, GPU only) are
-different measurements and do not track each other exactly.
+images prepared on the CPU) and the per-patch table (synthetic step, GPU only)
+are different measurements and do not track each other exactly.
 
 These kernels are dense enough to expose an undervolted clock governor: with
 the GPU's idle floor at 1000 MHz / 718 mV they produced wrong gradients in 66
@@ -147,13 +179,13 @@ DLPRIM_WINOGRAD_KSPLIT_MAX     <n>           split-K cap (default 16)
 DLPRIM_WINOGRAD_SPLIT_PLANES   0 | 1         backward-filter without atomics (default 1 unless the
 DLPRIM_WINOGRAD_BWD_PLANES     0 | 1         backward-data without atomics    device is NVIDIA or has
                                              cl_ext_float_atomics)
-DLPRIM_WINOGRAD_STRIDE_OFFSET  <n>           LDS padding (default 0 on AMD)
-DLPRIM_WINOGRAD_TR_OFFSET      <n>           LDS padding, transpose stage (default 1, but 0 in
-                                             the backward kernels wherever the padding would
-                                             cost a resident work-group - patch 09). Global:
-                                             setting it also moves the forward kernel, which
-                                             wants 1.
-DLPRIM_CONV_FP16               0 | 1         fp16 LDS tiles + packed-fp16 GEMM, fp32 tensors
+DLPRIM_WINOGRAD_STRIDE_OFFSET  <n>           scratch-tile padding (default 0 on AMD)
+DLPRIM_WINOGRAD_TR_OFFSET      <n>           scratch-tile padding, transpose stage (default 1, but
+                                             0 in the backward kernels wherever the padding would
+                                             cost a resident work-group - patch 09). One switch for
+                                             all three kernels, so setting it also moves the
+                                             forward kernel, which wants 1.
+DLPRIM_CONV_FP16               0 | 1         fp16 tiles + packed-fp16 multiply, fp32 tensors
                                              in/out (default 0). Raises the split-K defaults
                                              to 16 / 64 to keep fp16 sums short. Read at kernel
                                              compile time, so set it before the first convolution.

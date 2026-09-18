@@ -5,11 +5,12 @@
 
 ## Summary
 
-`activation_forward` / `activation_backward` build `activation.cl` with only
-the `ACTIVATION` define. The kernel is written in terms of `dtype`, which
-`defs.h` defaults to `float`, so a `half_data` tensor is read and written as
-float bytes: `relu`, `tanh`, `sigmoid` and `relu6` on a half tensor return
-garbage, silently.
+`activation_forward` / `activation_backward` build `activation.cl` with the
+`ACTIVATION` define and nothing else. The kernel is written in terms of
+`dtype`, and `defs.h` defaults `dtype` to `float` — so when the tensor is
+`half_data`, the kernel reads and writes its bytes as if they were floats.
+`relu`, `tanh`, `sigmoid` and `relu6` on a half tensor return garbage, with no
+error anywhere.
 
 Reproducer through `pytorch_ocl`:
 
@@ -20,7 +21,7 @@ torch.relu(x).cpu()          # wrong values, no error
 
 ## Fix
 
-Pass the dtype through, as the other kernels do:
+Pass the dtype through, the way the other kernels do:
 
 ```cpp
 cl::Program const &prog = gpu::Cache::instance().get_program(ctx, "activation",
@@ -28,12 +29,12 @@ cl::Program const &prog = gpu::Cache::instance().get_program(ctx, "activation",
         "dtype", data_type_to_opencl_type(x.dtype()));
 ```
 
-with a `DLPRIM_CHECK` that input and output dtypes match. In
+with a `DLPRIM_CHECK` that the input and output dtypes match. In
 `activation_diff` the `beta` argument is then better taken as `float` and cast
-inside the kernel, since the host passes a float. Patch:
-`patches/dlprimitives/01-activation-dtype.patch` in
+inside the kernel, since the host passes a float regardless of the tensor
+type. Patch: `patches/dlprimitives/01-activation-dtype.patch` in
 https://github.com/mxreyer/pytorch-dlprim-gfx1013. With it, all four
-activations on half match CPU forward and backward to fp16 precision
+activations on half match the CPU forward and backward to fp16 precision
 (sigmoid within 5e-4, the rest exactly).
 
 ## Disclosure

@@ -5,26 +5,30 @@
 
 ## Summary
 
-The rule that decides whether to split the K reduction in the Winograd
-backward-filter kernel is
+The backward-filter kernel can cut its reduction over the batch into slices
+and hand each slice to its own work-group, which is how a layer with few
+channels fills a large GPU. The rule that decides whether to do it is:
 
 ```cpp
 int winograd_work_items = (channels_in / 32) * (channels_out / 32) * 256;
 reduce_k_ = winograd_work_items < ctx.estimated_core_count() ? 8 : 1;
 ```
 
-The left side counts *work-items* (256 per work-group); `estimated_core_count()`
-returns `CU × 64` on AMD and `CU × 128` on NVIDIA. So the split only turns on
-when the launch has fewer than `CU/4` (AMD) or `CU/2` (NVIDIA) work-groups —
-far below what fills the device. The image size, i.e. how much K there is to
-split, never enters.
+The left side counts *work-items* — 256 of them per work-group.
+`estimated_core_count()` returns `CU × 64` on AMD and `CU × 128` on NVIDIA,
+i.e. lanes, not work-groups. Dividing both sides by 256, the rule says: split
+only when the launch has fewer than `CU/4` work-groups (AMD) or `CU/2`
+(NVIDIA) — far below what it takes to fill the device. The image size, which
+is what determines how much there is to split, never enters the decision at
+all.
 
 ## Effect
 
-On a 40-CU AMD device (BC-250, gfx1013) the threshold is 2,560 work-items =
-10 work-groups. A 128→128 3×3 layer launches exactly 16 work-groups, so it runs
-unsplit on 16 CUs with 24 idle for the whole kernel; 64→128 launches 8 and
-does split. A 40-SM T4 would behave the same way with its threshold at 20.
+On a 40-CU AMD device (BC-250, gfx1013) the threshold works out at 2,560
+work-items, i.e. 10 work-groups. A 128→128 3×3 layer launches exactly 16, so
+it stays unsplit: 16 compute units busy, 24 idle for the duration of the
+kernel. A 64→128 layer launches 8 and does get split. A 40-SM T4 would behave
+the same way, with its threshold at 20.
 
 Measured on ResNet-9 (batch 128, six 3×3 layers), per training step: the
 backward-filter kernels drop from 55.3 ms to 46.1 ms, the two 128→128 layers
@@ -50,10 +54,11 @@ while(k_split_ > 1 && k_work / k_split_ < 16)
 reduce_k_ = k_split_ > 1;
 ```
 
-with the launch's z-dimension set to `k_split_` instead of the fixed 8 (the
-kernel already derives its slice from `get_global_size(2)`). Targets of 8, 16
-and 32 per CU measured the same as 4 on this device, so the constant is not
-sensitive. Patch: `patches/dlprimitives/02-winograd-ksplit-heuristic.patch` in
+with the launch's z-dimension set to `k_split_` instead of the fixed 8 — the
+kernel already derives its slice from `get_global_size(2)`, so it needs no
+change. Targets of 8, 16 and 32 per CU measured the same as 4 on this device,
+so the constant is not sensitive. Patch:
+`patches/dlprimitives/02-winograd-ksplit-heuristic.patch` in
 https://github.com/mxreyer/pytorch-dlprim-gfx1013.
 
 ## Disclosure

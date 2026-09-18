@@ -21,39 +21,54 @@ which of these you want as PRs and how you would prefer them gated.
 
 ## 1. Backward kernels without `atomic_addf` (972 → 1,374 img/s) — `03-winograd-no-atomics`
 
-Both backward kernels accumulate through `atomic_addf`. On any device without
-a hardware fp32 atomic add that is the compare-and-swap loop in `atomic.h`,
-and it was **39% of the backward-filter kernel** (measured by swapping it for
-a racy plain `+=`). That is every RDNA1/RDNA2 GPU — `llc` lowers `atomicrmw
-fadd` to `global_atomic_cmpswap` for gfx1010–gfx1036; `global_atomic_add_f32`
-arrives with gfx11 — and the Intel path in `atomic.h` is also a CAS loop.
+Both backward kernels have many work-groups adding into the same output
+values, so they accumulate through `atomic_addf`. On a device with no hardware
+fp32 atomic add, that expands to the compare-and-swap loop in `atomic.h` —
+read the value, add to it, try to write it back, start over if another lane
+got there first — and it measured **39% of the backward-filter kernel** (found
+by swapping it for a racy plain `+=`). This is not a niche case: `llc` lowers
+`atomicrmw fadd` to `global_atomic_cmpswap` for gfx1010–gfx1036, so every
+RDNA1 and RDNA2 GPU takes that path, `global_atomic_add_f32` only arrives with
+gfx11, and the Intel path in `atomic.h` is a CAS loop as well.
 
-The atomics were only ever combining *across* K slices: within one slice each
-output element has exactly one writer. So each slice writes its own plane of
-the existing `workspace()` and a small kernel sums the planes (applying
-`beta`); backward-data does the same with four parity planes (the overlapping
-4×4 input-gradient tiles fall into four row/column parity classes whose members
-are disjoint). The reduce costs under 2% of the kernel it replaces.
+The atomics were only ever combining results *across* K slices. Within one
+slice, each output element has exactly one writer, so nothing needs
+protecting. Each slice can therefore write into its own plane of the existing
+`workspace()` and a small kernel can add the planes afterwards (applying
+`beta`).
 
-On NVIDIA and gfx11+ the atomics are free and the planes cost workspace plus a
-reduce, so the patch selects the planes when the device is not NVIDIA and does
+Backward-data takes the same treatment with a twist: its 4×4 input-gradient
+tiles genuinely do overlap, so there is no single-writer split by slice. But
+the overlap has structure — tiles whose row and column indices share the same
+parity never touch — so the tiles fall into four classes that are each
+conflict-free. Four planes, one per class, and the reduce masks the border
+elements that no tile of a class reaches (which also makes the old
+zero-fill/pre-scale pass unnecessary).
+
+The reduce costs under 2% of the kernel it replaces. On NVIDIA and gfx11+ the
+atomics are cheap and the planes would only cost workspace and an extra
+kernel, so the patch selects the planes when the device is not NVIDIA and does
 not advertise `cl_ext_float_atomics`, and keeps the atomic path otherwise.
 
 ## 2. Four access patterns (1,374 → 1,816 img/s, inference 4,433 → 6,418) — `04`, `05`, `06`
 
-Each found by timing a wrong-but-cheap variant of one stage:
+Three places where neighbouring lanes were reading far-apart addresses, so
+each read pulled in a cache line to use a few bytes of it. Each was found by
+timing a wrong-but-cheap variant of one stage:
 
-- `04-winograd-fwd-filter-layout`: the transformed filters are read at a `C × 64`-byte lane
-  stride (39% of the kernel). Storing them `[C][N]` instead of `[N][C]` makes
-  the 32 lanes that read one input channel for 32 output features contiguous.
-  Forward Winograd 24.4 → 15.0 ms per step.
-- `05-winograd-bwd-filter-loads`: lanes map to neighbouring tiles of one channel
-  plane (`k = lid % 8`) rather than to 32 different planes; edge tiles use one
-  bounded `vload4` per row with columns masked instead of a scalar path.
-  27.0 → 19.4 ms.
-- `06-bn-sums-grid-stride`: grid-stride reduction loop instead of one contiguous chunk per
-  work-item, which for 512 channels at 8×8 put every second lane 128 KB apart
-  and hit the same cache sets (13 GB/s). BatchNorm 9.6 → ~3 ms per step.
+- `04-winograd-fwd-filter-layout`: the transformed filters are read at a
+  `C × 64`-byte lane stride — 39% of the kernel. Storing them `[C][N]` instead
+  of `[N][C]` makes the 32 lanes that read one input channel for 32 output
+  features contiguous. Forward Winograd 24.4 → 15.0 ms per step.
+- `05-winograd-bwd-filter-loads`: lanes map to neighbouring tiles of one
+  channel plane (`k = lid % 8`) rather than to 32 different planes, which had
+  every lane reading a different image. Edge tiles use one bounded `vload4`
+  per row with the columns masked, instead of a scalar path. 27.0 → 19.4 ms.
+- `06-bn-sums-grid-stride`: a grid-stride reduction loop instead of one
+  contiguous chunk per work-item. With 512 channels at 8×8, the chunked
+  version put every second lane 128 KB apart, so they kept landing in the same
+  cache sets and the kernel ran at 13 GB/s on a 359 GB/s machine. BatchNorm
+  9.6 → ~3 ms per step.
 
 These are plain coalescing changes and should help everywhere, but they touch
 the hottest kernels in the library and I have one device, so they need your
@@ -61,16 +76,20 @@ numbers on NVIDIA/Intel before merging.
 
 ## 3. Register prefetch (1,816 → 2,055 img/s) — `07-winograd-prefetch`
 
-All three kernels issue the next K step's global loads before the current
-step's GEMM and transform/store afterwards. Step 65.0 → 59.8 ms. LDS
-double-buffering was measured and lost to occupancy; documented, not included.
+Each K step used to load its data, wait for it, then do its arithmetic. All
+three kernels now issue the *next* step's global loads before the current
+step's GEMM and do the transform and LDS store afterwards, so the memory
+latency overlaps with work instead of stalling on it. Step 65.0 → 59.8 ms.
+LDS double-buffering was measured too and lost to the occupancy it costs;
+documented, not included.
 
 ## 4. Optional fp16 inner loop (2,055 → 2,987 img/s) — `08-winograd-fp16`
 
-Behind `DLPRIM_CONV_FP16=1`: tiles converted to half on the way into LDS,
-GEMM as `half2` fma with half accumulators, fp32 tensors in memory. Y/dX/dW
-within ~0.5% of fp32 — about 10× looser than TF32, so opt-in. Included in case
-you want it as an option; no argument for it being the default.
+Behind `DLPRIM_CONV_FP16=1`: tiles converted to half on the way into LDS, the
+GEMM done as `half2` fma with half accumulators, tensors in memory still fp32.
+Y/dX/dW land within ~0.5% of the fp32 result — about 10× looser than TF32, so
+opt-in. Included in case you want it as an option; no argument for it being
+the default.
 
 ## Environment
 
