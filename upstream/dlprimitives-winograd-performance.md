@@ -11,7 +11,7 @@ Mesa rusticl) found that 89% of a step is convolution and 77% is the three
 Winograd kernels. Five changes to them take the step from 972 img/s (after the
 split-K fix filed separately) to 2,055, with gradients matching CPU references
 over 900 sweeps of the six layer shapes. They are a stacked series of six
-patches, one per item below, in `patches/dlprimitives/03`–`08` at
+patches, one per item below, in `patches/dlprimitives/03`–`07` and `09` at
 https://github.com/mxreyer/pytorch-dlprim-gfx1013 (`git format-patch` output
 with the commit messages). The per-section numbers below are from the
 investigation, in the order the changes were found; re-measured patch by
@@ -83,7 +83,7 @@ latency overlaps with work instead of stalling on it. Step 65.0 → 59.8 ms.
 LDS double-buffering was measured too and lost to the occupancy it costs;
 documented, not included.
 
-## 4. Optional fp16 inner loop (2,055 → 2,987 img/s) — `08-winograd-fp16`
+## 4. Optional fp16 inner loop (2,055 → 2,987 img/s) — `09-winograd-fp16`
 
 Behind `DLPRIM_CONV_FP16=1`: tiles converted to half on the way into LDS, the
 GEMM done as `half2` fma with half accumulators, tensors in memory still fp32.

@@ -51,6 +51,8 @@ fi
 
 echo "== applying patches =="
 # patches/<target>/NN-*.patch, in numeric order; README.md lists what each does.
+# patches/dlprimitives/optional/ is deliberately not globbed: local-knobs.patch
+# lives there and is applied by hand when an A/B measurement needs it.
 for p in "$HERE"/patches/dlprimitives/[0-9][0-9]-*.patch; do
     git -C "$SCRATCH/src/dlprimitives" apply "$p"
 done

@@ -86,7 +86,7 @@ A smaller version of the same change, if the rule above is more machinery than
 you want, is `toff = ctx.is_amd() ? 0 : 1` in the two backward constructors,
 matching the line above it.
 
-Patch: `patches/dlprimitives/09-winograd-tr-offset.patch` in
+Patch: `patches/dlprimitives/08-winograd-tr-offset.patch` in
 https://github.com/mxreyer/pytorch-dlprim-gfx1013.
 
 **This one depends on the rest of that series.** The numbers above were taken

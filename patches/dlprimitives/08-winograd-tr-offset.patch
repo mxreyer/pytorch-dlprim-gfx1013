@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: mxreyer <236478497+mxreyer@users.noreply.github.com>
-Date: Fri, 18 Sep 2026 09:46:42 -0700
+Date: Fri, 18 Sep 2026 13:24:37 -0700
 Subject: [PATCH] conv: drop the Winograd transpose padding when it halves LDS
  residency
 
@@ -36,19 +36,19 @@ Gradients unchanged: the define only moves data within __local.
  1 file changed, 28 insertions(+)
 
 diff --git a/src/core/conv.cpp b/src/core/conv.cpp
-index dc07b4a..9f46ccc 100644
+index 01bad54..bd41563 100644
 --- a/src/core/conv.cpp
 +++ b/src/core/conv.cpp
-@@ -244,6 +244,30 @@ namespace core {
-         return e && *e && atoi(e) != 0;
+@@ -230,6 +230,30 @@ namespace core {
+             || ctx.device_extensions().find("cl_ext_float_atomics") != std::string::npos;
      }
  
 +    // TR_STRIDE_OFFSET pads the transpose-stage scratch to keep rows off the
 +    // same LDS bank, but any non-zero offset also turns on PADDING_FACTOR in
 +    // the kernel, which allocates 16 more tile rows: 40 KiB per work-group
-+    // instead of 32 KiB in fp32. On a 64 KiB LDS that is the difference
-+    // between two resident work-groups per compute unit and one, and for the
-+    // backward kernels the residency is worth more than the bank conflicts.
++    // instead of 32 KiB. On a 64 KiB LDS that is the difference between two
++    // resident work-groups per compute unit and one, and for the backward
++    // kernels the residency is worth more than the bank conflicts.
 +    // The existing local_mem_size check below drops the padding when it does
 +    // not fit at all; this drops it when it fits but costs half the occupancy.
 +    // Measured on an AMD gfx1013 (40 CU, 64 KiB LDS), ResNet-9 step at batch
@@ -58,7 +58,7 @@ index dc07b4a..9f46ccc 100644
 +    {
 +        // (XTILES_IN_WG + YTILES_IN_WG) * WG_K * 16 elements, and 16 * WG_K *
 +        // 16 more when PADDING_FACTOR is on; see the kernel sources.
-+        int elem = conv_fp16() ? 2 : 4;
++        int elem = int(sizeof(float));
 +        int unpadded = 64 * 8 * 16 * elem;
 +        int padded   = 80 * 8 * 16 * elem;
 +        if(off != 0) // padding is on regardless of TR_STRIDE_OFFSET
@@ -70,7 +70,7 @@ index dc07b4a..9f46ccc 100644
      class Conv2DForwardWinograd : public Conv2DForward {
      public:
          virtual char const *algo() const
-@@ -344,6 +368,8 @@ namespace core {
+@@ -329,6 +353,8 @@ namespace core {
  
              int off = ctx.is_amd() ? 0 : 1;
              int toff = 1;
@@ -79,7 +79,7 @@ index dc07b4a..9f46ccc 100644
              int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
              if(local_mem_size < 40960) {
                  off = 0;
-@@ -498,6 +524,8 @@ namespace core {
+@@ -479,6 +505,8 @@ namespace core {
              reduce_k_ = k_split_ > 1;
              int off = ctx.is_amd() ? 0 : 1;
              int toff = 1;

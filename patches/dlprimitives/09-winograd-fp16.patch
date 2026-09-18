@@ -15,15 +15,19 @@ backward-filter 19.4 -> 12.4 per ResNet-9 step, 2,055 -> 2,987 img/s.
 Y/dX/dW within ~0.5% of fp32, about 10x looser than TF32, hence opt-in.
 A variant with fp32 accumulation via v_fma_mix_f32 was measured too:
 TF32-class accuracy but slower than plain fp32 on this chip.
+
+The LDS-residency rule from the previous patch is told about the half-sized
+tiles: with LTYPE half a padded work-group is 20 KiB, two of them fit, and
+the padding stays. Measured either way in fp16 mode, 2,889-2,901 img/s.
 ---
- src/core/conv.cpp                  | 30 ++++++++++---
+ src/core/conv.cpp                  | 32 +++++++++++---
  src/kernels/winograd_bwd_data.cl   | 68 ++++++++++++++++++++++++++---
  src/kernels/winograd_bwd_filter.cl | 69 ++++++++++++++++++++++++++---
  src/kernels/winograd_fwd.cl        | 70 +++++++++++++++++++++++++++---
- 4 files changed, 214 insertions(+), 23 deletions(-)
+ 4 files changed, 215 insertions(+), 24 deletions(-)
 
 diff --git a/src/core/conv.cpp b/src/core/conv.cpp
-index 01bad54..dc07b4a 100644
+index bd41563..50b5f7f 100644
 --- a/src/core/conv.cpp
 +++ b/src/core/conv.cpp
 @@ -10,6 +10,7 @@
@@ -51,10 +55,19 @@ index 01bad54..dc07b4a 100644
 +        return e && *e && atoi(e) != 0;
 +    }
 +
-     class Conv2DForwardWinograd : public Conv2DForward {
-     public:
-         virtual char const *algo() const
-@@ -297,6 +311,7 @@ namespace core {
+     // TR_STRIDE_OFFSET pads the transpose-stage scratch to keep rows off the
+     // same LDS bank, but any non-zero offset also turns on PADDING_FACTOR in
+     // the kernel, which allocates 16 more tile rows: 40 KiB per work-group
+@@ -245,7 +259,7 @@ namespace core {
+     {
+         // (XTILES_IN_WG + YTILES_IN_WG) * WG_K * 16 elements, and 16 * WG_K *
+         // 16 more when PADDING_FACTOR is on; see the kernel sources.
+-        int elem = int(sizeof(float));
++        int elem = conv_fp16() ? 2 : 4;   // LTYPE in the kernels
+         int unpadded = 64 * 8 * 16 * elem;
+         int padded   = 80 * 8 * 16 * elem;
+         if(off != 0) // padding is on regardless of TR_STRIDE_OFFSET
+@@ -321,6 +335,7 @@ namespace core {
                                              "ACTIVATION",int(activation),
                                              "STRIDE_OFFSET",off,
                                              "TR_STRIDE_OFFSET",toff,
@@ -62,7 +75,7 @@ index 01bad54..dc07b4a 100644
                                              "BIAS",int(bias));
              conv_kernel_ = cl::Kernel(prog,"winconv_calc_gkgt_3x3");
              conv_ = cl::Kernel(prog,"winconv_3x3");
-@@ -336,7 +351,8 @@ namespace core {
+@@ -362,7 +377,8 @@ namespace core {
              }
              cl::Program const &prog = gpu::Cache::instance().get_program(ctx,"winograd_bwd_data",
                          "STRIDE_OFFSET",off,"TR_STRIDE_OFFSET",toff,
@@ -72,7 +85,7 @@ index 01bad54..dc07b4a 100644
              conv_kernel_bwd_ = cl::Kernel(prog,"winconv_calc_gkgt_3x3");
              bw_conv_data_ = cl::Kernel(prog,"winconv_3x3_bwd_data");
              if(use_planes_)
-@@ -453,13 +469,16 @@ namespace core {
+@@ -479,13 +495,16 @@ namespace core {
              // below CU/4 (AMD) or CU/2 (NVIDIA) work-groups: on a 40-CU part a
              // 128->128 layer ran its 16 work-groups unsplit with 24 CUs idle.
              // Aim for ~4 work-groups per CU (8, 16 and 32 measured the same),
@@ -92,7 +105,7 @@ index 01bad54..dc07b4a 100644
                  k_split_ *= 2;
              int k_work = config.shape[0] * ((h + 1) / 2) * ((w + 1) / 2);
              while(k_split_ > 1 && k_work / k_split_ < 16)
-@@ -488,7 +507,8 @@ namespace core {
+@@ -516,7 +535,8 @@ namespace core {
                                                                              "IMG_H",h,"IMG_W",w,
                                                                              "STRIDE_OFFSET",off,
                                                                              "TR_STRIDE_OFFSET",toff,

@@ -205,7 +205,7 @@ within run-to-run variance. Inference is untouched, as expected — there is no
 backward-filter kernel in an inference pass. Gradients match CPU to better than
 1e-5 relative for every ResNet-9 layer shape.
 
-`09-local-knobs.patch` adds environment variables to make these choices
+`optional/local-knobs.patch` adds environment variables to make these choices
 measurable instead of assumed — `DLPRIM_CONV_ALGO`, `DLPRIM_CONV_FWD_ALGO`,
 `DLPRIM_CONV_BWD_DATA_ALGO`, `DLPRIM_CONV_BWD_FILTER_ALGO`
 (`auto`|`winograd`|`gemm`|`depthwise_separable`) and `DLPRIM_WINOGRAD_KSPLIT`
@@ -1414,7 +1414,7 @@ LDS footprint and the same residency step; it simply pays more for the bank
 conflicts than it gains from the second work-group. Left measured, not
 explained.
 
-`09-winograd-tr-offset.patch` drops the padding in the two backward
+`08-winograd-tr-offset.patch` drops the padding in the two backward
 constructors when the device's `__local` is large enough for the unpadded
 work-group to double up but not the padded one, which is true on this chip and
 false wherever `STRIDE_OFFSET` is already 1 (every non-AMD device pays for the
@@ -1453,6 +1453,32 @@ value was the one already there.
 
 Inference does not move, as expected — an inference pass has no backward
 kernel. Gradients: 0 bad over 300 `tools/wino-repro.py` sweeps.
+
+### Reordered, and what that showed
+
+**2026-09-18.** The padding patch moved to `08`, ahead of the opt-in fp16
+loop at `09`, so that everything on by default comes first in the series. It
+had to be split slightly to do so: `drop_tr_padding()` asks how large a tile
+element is, which in the old order it could read off `conv_fp16()`. At `08`
+that helper does not exist yet, so the rule starts out fp32-only and the fp16
+patch extends it.
+
+Rebuilding each prefix to re-measure the per-patch column turned up something
+the old order had hidden. The two patches are not additive:
+
+| | old order | new order |
+| --- | ---: | ---: |
+| after `07-winograd-prefetch` | 2,068 | 2,068 |
+| after the next patch | 2,062 (fp16) | **2,261** (padding) |
+| after the one after that | **2,330** (padding) | **2,354** (fp16) |
+
+Same endpoint, but in the new order the fp16 patch is worth ~4% *with fp16
+switched off*, where in the old order it measured as no change at all. The
+plausible cause is that it rewrites the tile stores through `LTYPE` and
+`STORE_LOCAL` even when `HALF_GEMM` is 0, and that codegen difference only
+starts to matter once the padding change has put two work-groups on each CU.
+Not chased further; recorded because it is a reminder that a per-patch column
+in a stacked series measures the patch *in that position*, not in isolation.
 
 ## What is left on the table
 

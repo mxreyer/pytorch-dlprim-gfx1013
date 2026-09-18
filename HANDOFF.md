@@ -17,22 +17,24 @@ img/s in the
 | + atomics-free backward paths | 1,378 | 4,433 | 0 bad / 300 |
 | + four access-pattern fixes | 1,816 | 6,418 | 0 bad / 300 |
 | + register prefetch | 2,055 | 7,064 | 0 bad / 300 (Y, dW, dX); BatchNorm within 7e-7 of CPU |
-| **+ backward scratch padding dropped (what ships)** | **2,244** | **6,774** | **0 bad / 300** |
-| opt-in `DLPRIM_CONV_FP16=1` | 2,768 | 8,346 | conv within ~0.5% of fp32; 16-epoch accuracy unchanged |
+| **+ backward scratch padding dropped (what ships)** | **2,212** | **6,802** | **0 bad / 300** |
+| opt-in `DLPRIM_CONV_FP16=1` | 2,561 | 8,545 | conv within ~0.5% of fp32; 16-epoch accuracy unchanged |
 | T4 (Colab), fp32, for scale | 2,294 | 7,217 | |
 
-The last two rows and the one above them were measured on 2026-09-18 in
-`scratch/venv`; everything above that on 2026-09-15 in the notebook image,
-which reads a few percent higher here and ~20% higher on fp16 inference. So
-the rows are not one clean ladder — the padding patch's own A/B, same binary
-and same session, is 1,993 → 2,244 training and 6,732 → 6,774 inference.
-README has the note.
+The bottom two rows are medians of three runs of the shipped build on
+2026-09-18; everything above them is a single run from 2026-09-15 in the
+notebook image. So the rows are not one clean ladder, and this benchmark
+swings several percent between identical runs on this box — it prepares its
+images on the same four CPU cores the training loop needs (README has the
+numbers). The padding patch's own A/B, same binary and back to back, was
+1,993 → 2,244 training with inference unmoved; the GPU-only step for the
+same change, 60.6 → 53.8 ms, is the tighter number.
 
 Everything is on by default on this device. The plane-based backward paths
 switch themselves on wherever the GPU has no hardware float atomic add;
 NVIDIA and anything advertising `cl_ext_float_atomics` keep the atomics.
-`DLPRIM_WINOGRAD_BWD_PLANES=0` / `_SPLIT_PLANES=0` bring the old
-emulated-atomic kernels back for comparison.
+With the optional knobs patch applied, `DLPRIM_WINOGRAD_BWD_PLANES=0` /
+`_SPLIT_PLANES=0` bring the old emulated-atomic kernels back for comparison.
 
 ## The one thing to know before debugging a wrong gradient
 
@@ -90,17 +92,19 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
   Each CU has a fixed budget of fast on-chip scratch memory, and a work-group
   that asks for more of it means fewer of them run at once. `tools/ocl-micro.c
   occ` sweeps that allocation and counts: 16 KiB → 3.9 work-groups per CU,
-  32 KiB → 2.0, 40 KiB → 1.2. That boundary is what `09-winograd-tr-offset`
+  32 KiB → 2.0, 40 KiB → 1.2. That boundary is what `08-winograd-tr-offset`
   acts on, and it corrects an assumption in Finding 12 that the fp32 kernels
   ran 3 to a CU — at 40 KiB each they had a CU apiece. Finding 12's
   conclusions still hold (scratch memory was the binding limit either way),
   but any future occupancy claim should come from this probe.
 - **The patches are a series now** (2026-09-15): `patches/dlprimitives/01`–`09`
   are one patch per upstream report, each built and swept on its own on the
-  way up (README has the per-patch numbers); `10` holds the measurement env
-  vars. `build.sh` recreates `scratch/` from the patch files, so any work on
-  the kernels should end with `git format-patch` into `patches/`, not with
-  edits left in `scratch/`.
+  way up (README has the per-patch numbers). The measurement env vars moved
+  out of the series on 2026-09-18 and now live in
+  `patches/dlprimitives/optional/local-knobs.patch`, which `build.sh` does not
+  apply — apply it by hand to reproduce an A/B. `build.sh` recreates
+  `scratch/` from the patch files, so any work on the kernels should end with
+  `git format-patch` into `patches/`, not with edits left in `scratch/`.
 
 ## Open
 

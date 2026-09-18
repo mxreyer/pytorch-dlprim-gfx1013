@@ -12,6 +12,7 @@ when the GPU runs below its voltage floor; see OPENCL-PERF.md, Finding 3.
   RUSTICL_ENABLE=radeonsi python3 tools/wino-repro.py 300
 
   # the emulated-atomics kernels instead, for comparison. Expect 0 bad.
+  # (needs patches/dlprimitives/optional/local-knobs.patch in the build)
   RUSTICL_ENABLE=radeonsi DLPRIM_WINOGRAD_SPLIT_PLANES=0 \
       DLPRIM_WINOGRAD_BWD_PLANES=0 python3 tools/wino-repro.py 300
 
