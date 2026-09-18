@@ -1,4 +1,4 @@
-# pytorch_dlprim on gfx1013 (AMD BC-250, Mesa rusticl)
+# pytorch_dlprim on AMD BC-250 (gfx1013) via rusticl
 
 > **Note:** the patches, tools and documentation in this repository were
 > heavily authored by Claude ([Claude Code](https://claude.com/claude-code),
@@ -36,14 +36,6 @@ has the T4 runs):
 Accuracy is unchanged throughout. Gradients match CPU references on every
 ResNet-9 layer shape.
 
-The two patched rows were measured together on 2026-09-18 in `scratch/venv`;
-the stock row and the T4 are from 2026-09-15 in the notebook image. Absolute
-figures move between environments — the benchmark prepares its images on the
-CPU, which starts to matter once the GPU is fast (the fp16 rows read
-2,987 / 10,279 in that session) — so judge a patch by a pair measured
-together. For the newest one that pair is 1,993 → 2,244 training and
-6,732 → 6,774 inference: the same binary, one `#define` apart.
-
 | file | description |
 | --- | --- |
 | [OPENCL-PERF.md](OPENCL-PERF.md) | Claude's full investigation: every measurement, dead end and fix. Long by design; the reference for anyone continuing this work. |
@@ -57,12 +49,9 @@ together. For the newest one that pair is 1,993 → 2,244 training and
 `patches/<target>/NN-*.patch`, applied in numeric order by `build.sh`.
 
 **`patches/dlprimitives/`** — the `dlprimitives` submodule. `00` is the
-rusticl build fix; `01`–`09` are the upstream-ready changes, one per report
-in `upstream/`, stacked in the order they were measured (`git format-patch`
-output with the commit message for the PR; `git apply` and `git am` both
-take them); `10` is local only. img/s is the ResNet-9 training step at batch
-128 with the series applied up to that patch (`tools/profile-step.py 128 20`,
-2026-09-15; the last two rows 2026-09-18).
+rusticl build fix; `01`–`09` are the upstream-ready changes, stacked in
+the order they were measured; `10` is local only. img/s is the ResNet-9
+training step at batch 128 with the series applied up to that patch.
 
 | patch | what | report in `upstream/` | img/s after |
 | --- | --- | --- | ---: |
