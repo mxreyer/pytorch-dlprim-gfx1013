@@ -14,7 +14,7 @@ diagnostic that located the governor-voltage wrong-gradient issue.
  1 file changed, 181 insertions(+), 37 deletions(-)
 
 diff --git a/src/core/conv.cpp b/src/core/conv.cpp
-index dc07b4a..d3aa113 100644
+index 9f46ccc..5c46a56 100644
 --- a/src/core/conv.cpp
 +++ b/src/core/conv.cpp
 @@ -9,8 +9,14 @@
@@ -75,8 +75,8 @@ index dc07b4a..d3aa113 100644
 +        return env_enabled("DLPRIM_CONV_FP16",false);
      }
  
-     class Conv2DForwardWinograd : public Conv2DForward {
-@@ -302,6 +323,14 @@ namespace core {
+     // TR_STRIDE_OFFSET pads the transpose-stage scratch to keep rows off the
+@@ -326,6 +347,14 @@ namespace core {
          {
              int off = ctx.is_amd() ? 0 : 1;
              int toff = 1;
@@ -91,7 +91,7 @@ index dc07b4a..d3aa113 100644
              int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
              if(local_mem_size < 40960) {
                  off = 0;
-@@ -331,19 +360,30 @@ namespace core {
+@@ -355,21 +384,32 @@ namespace core {
              config_(config),
              s_(ctx,config.dtype)
          {
@@ -117,10 +117,12 @@ index dc07b4a..d3aa113 100644
  
              int off = ctx.is_amd() ? 0 : 1;
              int toff = 1;
-+            // BC-250 investigation: STRIDE_OFFSET is the LDS padding that keeps
-+            // rows off the same bank. Hardcoding it to 0 for AMD leaves the
-+            // stride at XTILES_IN_WG*WG_K = 256 floats, an exact multiple of
-+            // the 32 LDS banks. Overridable so the choice can be measured.
+             if(drop_tr_padding(ctx,off))
+                 toff = 0;
++            // BC-250 investigation: the two LDS padding defines, overridable
++            // so the choice - including the residency rule above - can be
++            // measured. TR_OFFSET is global, so it also moves the forward
++            // kernel, which wants its padding kept.
 +            if(char const *e = getenv("DLPRIM_WINOGRAD_STRIDE_OFFSET"))
 +                off = atoi(e);
 +            if(char const *e = getenv("DLPRIM_WINOGRAD_TR_OFFSET"))
@@ -128,7 +130,7 @@ index dc07b4a..d3aa113 100644
              int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
              if(local_mem_size < 40960) {
                  off = 0;
-@@ -409,7 +449,7 @@ namespace core {
+@@ -435,7 +475,7 @@ namespace core {
              
              // With planes there is nothing to pre-scale: the reduce applies
              // beta and masks the border elements no tile of a parity class
@@ -137,7 +139,7 @@ index dc07b4a..d3aa113 100644
              if(!use_planes_)
                  s_.enqueue(factor,dx,ec1);
  
-@@ -462,32 +502,56 @@ namespace core {
+@@ -488,32 +528,56 @@ namespace core {
          {
              int h = config.shape[2];
              int w = config.shape[3];
@@ -215,14 +217,14 @@ index dc07b4a..d3aa113 100644
              if(use_split_planes_) {
                  size_t plane = size_t(9) * config_.channels_in
                               * config_.channels_out * sizeof(float);
-@@ -498,6 +562,14 @@ namespace core {
-             reduce_k_ = k_split_ > 1;
-             int off = ctx.is_amd() ? 0 : 1;
+@@ -526,6 +590,14 @@ namespace core {
              int toff = 1;
-+            // BC-250 investigation: STRIDE_OFFSET is the LDS padding that keeps
-+            // rows off the same bank. Hardcoding it to 0 for AMD leaves the
-+            // stride at XTILES_IN_WG*WG_K = 256 floats, an exact multiple of
-+            // the 32 LDS banks. Overridable so the choice can be measured.
+             if(drop_tr_padding(ctx,off))
+                 toff = 0;
++            // BC-250 investigation: the two LDS padding defines, overridable
++            // so the choice - including the residency rule above - can be
++            // measured. TR_OFFSET is global, so it also moves the forward
++            // kernel, which wants its padding kept.
 +            if(char const *e = getenv("DLPRIM_WINOGRAD_STRIDE_OFFSET"))
 +                off = atoi(e);
 +            if(char const *e = getenv("DLPRIM_WINOGRAD_TR_OFFSET"))
@@ -230,7 +232,7 @@ index dc07b4a..d3aa113 100644
              int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
              if(local_mem_size < 40960) {
                  off = 0;
-@@ -513,6 +585,9 @@ namespace core {
+@@ -541,6 +613,9 @@ namespace core {
              if(k_split_ > 1 && use_split_planes_)
                  reduce_ = cl::Kernel(prog,"winconv_3x3_bwd_filter_reduce");
          }
@@ -240,7 +242,7 @@ index dc07b4a..d3aa113 100644
          virtual size_t workspace()
          {
              if(k_split_ <= 1 || !use_split_planes_)
-@@ -551,6 +626,49 @@ namespace core {
+@@ -579,6 +654,49 @@ namespace core {
                  ExecutionContext ec2 = ec.generate_series_context(1,2);
                  ec.queue().enqueueNDRangeKernel(bw_conv_filter_,cl::NullRange,gr,wg,ec1.events(),ec1.event("winograd_bwd_filter"));
  
@@ -290,7 +292,7 @@ index dc07b4a..d3aa113 100644
                  int total = 9 * C * N;
                  int rp=0;
                  reduce_.setArg(rp++,total);
-@@ -563,7 +681,7 @@ namespace core {
+@@ -591,7 +709,7 @@ namespace core {
                  ec.queue().enqueueNDRangeKernel(reduce_,cl::NullRange,cl::NDRange(gr2),cl::NDRange(lr),
                                                  ec2.events(),ec2.event("winograd_bwd_filter_reduce"));
              }
@@ -299,7 +301,7 @@ index dc07b4a..d3aa113 100644
                  // atomic accumulate across slices: dK must be pre-scaled
                  ExecutionContext ec1 = ec.generate_series_context(0,2);
                  ExecutionContext ec2 = ec.generate_series_context(1,2);
-@@ -766,7 +884,7 @@ namespace core {
+@@ -794,7 +912,7 @@ namespace core {
              if(second_reduce_ > 1)
                  reduce_ = cl::Kernel(prog,"reduce");
          }
@@ -308,7 +310,7 @@ index dc07b4a..d3aa113 100644
          {
              int kitems = dK.shape().total_size();
              int batch = x.shape()[0];
-@@ -852,12 +970,36 @@ namespace core {
+@@ -880,12 +998,36 @@ namespace core {
              && config.pad[0] == 1;
      }
  
@@ -346,7 +348,7 @@ index dc07b4a..d3aa113 100644
          bool win = is_winograd_compatible(ctx,config);
          bool dsc = is_depthwise_separable_compatible(config);
  
-@@ -878,8 +1020,9 @@ namespace core {
+@@ -906,8 +1048,9 @@ namespace core {
          }
          return r;
      }
@@ -357,7 +359,7 @@ index dc07b4a..d3aa113 100644
          bool win = is_winograd_compatible(ctx,config);
          bool dsc = is_depthwise_separable_compatible(config);
  
-@@ -900,8 +1043,9 @@ namespace core {
+@@ -928,8 +1071,9 @@ namespace core {
          }
          return r;
      }

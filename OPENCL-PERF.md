@@ -11,10 +11,12 @@ are from that repository's
 (ResNet-9 on CIFAR-10, batch 128, 16 epochs, CPU-side augmentation);
 "isolated step" numbers are the GPU step alone (`tools/profile-step.py`).
 
-Five of the findings turned into fixes that are in this repo, worth **2.26×**
-on training throughput (909 → 2,055 img/s) and 1.57× on inference (4,489 →
-7,064) at fp32 — within 1.12× and 1.02× of a T4; an opt-in fp16 inner loop
-(Finding 11) takes that to 2,987 and 10,279, past the T4's fp32 numbers. The largest of them spent two
+The findings that turned into fixes are worth **2.5×** on training throughput
+(909 → 2,244 img/s) and 1.5× on inference (4,489 → 6,774) at fp32 — within
+1.02× and 1.07× of a T4; an opt-in fp16 inner loop (Finding 11) takes that to
+2,768 and 8,346, past the T4's fp32 numbers. (Those endpoints were measured in
+different sessions and environments; README notes which, and every A/B below
+is a pair measured together.) The largest of them spent two
 weeks switched off behind what looked like a code generation bug in the
 graphics driver; it was the clock governor's idle voltage, and the story of
 being wrong about that — and how it was finally settled — is the most useful
@@ -50,6 +52,7 @@ looks like it is.
 | 10 | With the profile finally honest, four **memory access patterns**: a strided transformed-kernel read in forward Winograd (39% of that kernel), lane-to-channel mapping and scalar edge loads in backward-filter, and a BatchNorm reduction that hit the same cache sets every step (13 GB/s) | `dlprimitives` kernels | **fixed and shipping**: 1,460 → **1,963 img/s** in the isolated step; **1,816** over 16 epochs, inference **4,433 → 6,418** |
 | 11 | **fp16 inner loop for the Winograd kernels** (`DLPRIM_CONV_FP16=1`, opt-in): packed `v_pk_fma_f16` runs at 91% of the 2× fp16 peak through rusticl; fp32 tensors in and out, fp16 LDS tiles and accumulation over one K slice | `dlprimitives` kernels | **shipping, opt-in**: 2,714 img/s training (acc 0.928), **9,584 inference** — both past the T4's fp32 numbers; Y/dX/dW within ~0.5% of fp32 |
 | 12 | **Software pipelining**: prefetching the next K step's tiles into registers before the GEMM | `dlprimitives` kernels | **shipping**: 2,055 img/s / 7,064 inference at fp32 (T4: 2,294 / 7,217); 2,987 / 10,279 in fp16 mode. LDS double-buffering and fp32-accumulate mixed precision measured and rejected |
+| 13 | The Winograd **transpose padding costs 8 KiB of `__local`**, which is a resident work-group per CU; the two backward kernels are better off without it and the forward kernel is not | `dlprimitives` host code — one `#define` | **shipping**: 60.6 → 53.8 ms of GPU time per step, **1,993 → 2,244 img/s** over 16 epochs, inference unchanged. Against the *stock* backward kernels the same change is a loss |
 
 ## First: where does the time actually go?
 
@@ -1282,8 +1285,10 @@ the comparison.
 after step k's barrier, before the GEMM, into registers; after the GEMM they
 are transformed and stored to LDS. The loaders were split into a raw load and
 the transform so the latency of the load, not the arithmetic, is what moves.
-Costs 20 VGPRs; the kernels were LDS-limited to 3 work-groups per CU anyway, so
-occupancy is unchanged.
+Costs 20 VGPRs; the kernels were LDS-limited anyway, so occupancy is
+unchanged. (The "3 work-groups per CU" this section originally claimed was an
+assumption, not a measurement, and it was wrong — at 40 KiB each they were
+resident one to a CU. Finding 13 measures it and turns the 40 KiB into 32.)
 
 | kernel, fp32 | before | after | | fp16 mode | before | after | |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
@@ -1340,6 +1345,115 @@ structure altogether — which is a rewrite, not tuning. And with convolution at
 pooling, the 110-launch optimizer — is now a third of the step and the better
 target.
 
+## Finding 13 — the padding that cost a work-group
+
+Everything above changed a kernel or a launch. This one changes a `#define` —
+the only fix here that is purely a constant, and the only one `dlprimitives`'
+existing tuning vocabulary could state as it stands. It was found by asking
+whether that vocabulary could have produced any of the rest.
+
+The three Winograd kernels pad their `__local` tiles against bank conflicts
+with `STRIDE_OFFSET` and `TR_STRIDE_OFFSET`, picked in `conv.cpp`:
+
+```cpp
+int off = ctx.is_amd() ? 0 : 1;
+int toff = 1;
+```
+
+Two constants, per vendor, exactly the shape of
+[PR #30](https://github.com/artyom-beilis/dlprimitives/pull/30) (which adds
+Imagination GEMM tile sizes). Nobody had measured them here, so:
+
+| `TR_STRIDE_OFFSET` | 0 | 1 (default) | 2 | 3 | 4 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| img/s, isolated step | 2,242 | 2,052 | 2,054 | 2,064 | 2,018 |
+
+**+9% from one constant.** And the profile says it is not uniform: the two
+backward kernels get faster and the forward kernel gets slower, so the right
+value is per direction. Medians of three profiled runs:
+
+| kernel | padded | unpadded |
+| --- | ---: | ---: |
+| `winograd_bwd_filter` | 19.08 ms | **14.93** |
+| `winograd_3x3_main_bwd` | 14.75 | **12.08** |
+| `winograd_3x3_main` (forward) | **14.08** | 16.84 |
+| step (GPU time) | 60.57 | **53.83** (per direction) |
+
+### Why a stride offset costs 8 KiB
+
+Because it is not only a stride. Any non-zero offset trips `PADDING_FACTOR`,
+which allocates 16 more tile rows:
+
+```c
+#if STRIDE_OFFSET > 0 || TR_STRIDE_OFFSET > 0
+#define PADDING_FACTOR 1
+#endif
+__local LTYPE wg_local_memory[(XTILES_IN_WG + YTILES_IN_WG + 16 * PADDING_FACTOR) * WG_K * 16];
+```
+
+(32 + 32 + 16) × 8 × 16 floats = **40 KiB per work-group**, against 32 KiB
+with both offsets at zero. On AMD `off` is already 0, so `toff = 1` was buying
+one padded transpose stride and paying the whole 8 KiB for it.
+
+That is a residency boundary, and it is measurable —
+`tools/ocl-micro.c occ` launches eight 256-item work-groups per CU of a
+latency-bound kernel and divides the time by the one-per-CU time:
+
+| `__local` per work-group | 8 K | 16 K | 20 K | 24 K | 32 K | 36 K | 40 K | 48 K |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| work-groups resident per CU | 6.9 | 3.9 | 2.7 | 2.0 | 2.0 | 1.1 | 1.2 | 1.3 |
+
+A 32 KiB work-group shares its CU with a second; a 40 KiB one has the CU to
+itself. (This also corrects Finding 12, which assumed three resident
+work-groups per CU in fp32. It was one. The conclusion there — that
+prefetch's 20 extra VGPRs cost no occupancy — still holds, because LDS is the
+binding limit either way.)
+
+Why the forward kernel goes the other way is not established. It has the same
+LDS footprint and the same residency step; it simply pays more for the bank
+conflicts than it gains from the second work-group. Left measured, not
+explained.
+
+`09-winograd-tr-offset.patch` drops the padding in the two backward
+constructors when the device's `__local` is large enough for the unpadded
+work-group to double up but not the padded one, which is true on this chip and
+false wherever `STRIDE_OFFSET` is already 1 (every non-AMD device pays for the
+padding regardless). In fp16 mode the tiles halve, the rule does not
+fire, and the measurement agrees that it should not: 2,889–2,901 img/s with
+the rule against 2,886–2,903 with the padding forced back on, i.e. the same
+number. Forcing the padding *off* in fp16 costs 5%: 2,738.
+
+### It is not a knob you could have set from outside
+
+The tempting summary — "so the win was available by tuning all along" — is
+wrong, and the same binary says so. With the backward kernels as they ship
+upstream (emulated `atomic_addf`, stock split-K) the *same* define goes the
+other way:
+
+| | all padded | backward unpadded |
+| --- | ---: | ---: |
+| this series | 2,069 img/s | **2,330** |
+| stock backward kernels (`*_PLANES=0`, `KSPLIT=stock`) | **1,171** | 849 |
+
+Those kernels are bound by the compare-and-swap loop, not by occupancy, so
+they collect the bank conflicts and none of the benefit. The right value of a
+tuning constant is a property of the kernel it tunes, not of the device alone
+— which is the answer to "could per-device tuning have found this instead of
+patching the kernels?": no, because before the kernels changed, the tuned
+value was the one already there.
+
+### End to end
+
+16 epochs, same binary, one define apart (2026-09-18, `scratch/venv`):
+
+| | train img/s | s/epoch | test acc | epochs to 90% | infer bs128 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| padded (previous default) | 1,993 | 25.1 | 0.924 | 13 | 6,732 |
+| per direction (ships) | **2,244** | **22.3** | 0.924 | 13 | 6,774 |
+
+Inference does not move, as expected — an inference pass has no backward
+kernel. Gradients: 0 bad over 300 `tools/wino-repro.py` sweeps.
+
 ## What is left on the table
 
 [HANDOFF.md](HANDOFF.md) has the same list in priority order, with the
@@ -1370,6 +1484,13 @@ constraints and dead ends a fresh start would otherwise rediscover.
 - **Software pipelining.** Register prefetch is done (Finding 12). Full LDS
   double-buffering loses to occupancy on this chip. What is left in the
   Winograd kernels is structural — barriers per K step — and is a rewrite.
+- **The other tuning constants.** Finding 13 found +12% in one of them and a
+  probe (`tools/ocl-micro.c occ`) for the resource it trades. The rest of the
+  Winograd geometry — `WG_K = 8`, 32×32 tiles, the 8×8 register patch — has
+  never been swept on this device, and unlike `TR_STRIDE_OFFSET` those are
+  kernel-source constants rather than a host-side define. The lesson from
+  Finding 13 is that their right values moved when the kernels changed, so a
+  sweep is worth more now than it would have been before the series.
 - **The non-convolution 14 ms.** A third of the fp16-mode step now: BatchNorm
   (~3 ms), activation forward/backward (~2.5), pooling (~1.6), the SGD
   optimizer's 110 launches (~1.3), the planes reduce (~1.4). BN+ReLU fusion and

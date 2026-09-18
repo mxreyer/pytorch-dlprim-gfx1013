@@ -4,7 +4,8 @@
 //   gcc -O2 -o ocl-micro tools/ocl-micro.c -lOpenCL
 //   RUSTICL_ENABLE=radeonsi ./ocl-micro [test]
 //
-// test: all (default) | info | alu | bw | cache | lds | atomics | lat | tile | launch | xfer
+// test: all (default) | info | alu | bw | cache | lds | atomics | lat | tile | occ |
+//       launch | xfer
 //
 // Every number it prints is a best-of-N wall-clock measurement around
 // clEnqueueNDRangeKernel + clFinish, so it includes dispatch overhead. The
@@ -352,6 +353,56 @@ static void t_tile(void)
     clReleaseMemObject(O);
 }
 
+// ---------------------------------------------------------------- occupancy
+// How much __local a work-group may hold before it costs residency. The
+// kernel is latency-bound (a dependent global pointer chase), so more
+// work-groups resident on a CU means more loads in flight and a proportionally
+// shorter run. Sweeping the __local allocation walks down the residency steps,
+// and the step positions give the LDS budget a CU actually partitions -
+// CL_DEVICE_LOCAL_MEM_SIZE only reports the per-work-group maximum.
+static const char *OCC_SRC =
+"__kernel __attribute__((reqd_work_group_size(256,1,1)))\n"
+"void occ(__global const int *chain,__global int *out,int steps){\n"
+"  __local int buf[LDS_INTS];\n"
+"  int l=get_local_id(0);\n"
+"  buf[l]=l;\n"
+"  barrier(CLK_LOCAL_MEM_FENCE);\n"
+"  int q=buf[l]+get_group_id(0)*257;\n"
+"  for(int i=0;i<steps;i++) q=chain[q];\n"
+"  buf[l&(LDS_INTS-1)]=q;\n"
+"  barrier(CLK_LOCAL_MEM_FENCE);\n"
+"  if(q==0x7fffffff) out[get_group_id(0)]=buf[l];\n}\n";
+
+static void t_occ(void)
+{
+    cl_int err; int N=1<<22;
+    int *h=malloc((size_t)N*4);
+    for(int i=0;i<N;i++) h[i]=(int)(((long)i+1024)%N);
+    cl_mem A=clCreateBuffer(g_ctx,CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,(size_t)N*4,h,&err); CHK(err);
+    cl_mem O=clCreateBuffer(g_ctx,CL_MEM_WRITE_ONLY,1<<20,0,&err); CHK(err);
+    // one work-group per CU: nothing shares a CU, so this is the floor
+    double t1=0;
+    const int kib[]={4,8,12,16,20,24,28,32,36,40,44,48,56,64};
+    printf("  %7s %10s %10s %8s\n","__local","us/round","speedup","implied");
+    for(unsigned i=0;i<sizeof kib/sizeof*kib;i++){
+        char opts[64]; snprintf(opts,sizeof opts,"-DLDS_INTS=%d",kib[i]*256);
+        cl_program p=build(OCC_SRC,opts);
+        cl_kernel k=clCreateKernel(p,"occ",&err); CHK(err);
+        int steps=3000; size_t l=256;
+        CHK(clSetKernelArg(k,0,sizeof A,&A)); CHK(clSetKernelArg(k,1,sizeof O,&O));
+        CHK(clSetKernelArg(k,2,sizeof steps,&steps));
+        if(t1==0) t1=timeit(k,(size_t)g_cus*l,l,3);         // 1 wg/CU reference
+        double d=timeit(k,(size_t)g_cus*8*l,l,3)/8.0;        // 8 wgs/CU, per round
+        printf("  %5d K %10.0f %9.2fx %6.0f K\n",
+               kib[i],d*1e6,t1/d,kib[i]*(t1/d));
+        clReleaseKernel(k); clReleaseProgram(p);
+    }
+    printf("\n  speedup is how many work-groups of that size run concurrently on one\n"
+           "  CU; 'implied' is size x speedup, i.e. the LDS budget being divided.\n"
+           "  It stops rising once something other than LDS caps residency.\n");
+    free(h); clReleaseMemObject(A); clReleaseMemObject(O);
+}
+
 // ---------------------------------------------------------------- launch / xfer
 static void t_launch(void)
 {
@@ -410,7 +461,7 @@ int main(int argc,char**argv)
     struct { const char *nm; void (*fn)(void); } tests[] = {
         {"info",t_info},{"alu",t_alu},{"bw",t_bw},{"cache",t_cache},
         {"lds",t_lds},{"atomics",t_atomics},{"lat",t_lat},{"tile",t_tile},
-        {"launch",t_launch},{"xfer",t_xfer},
+        {"occ",t_occ},{"launch",t_launch},{"xfer",t_xfer},
     };
     for(unsigned i=0;i<sizeof tests/sizeof*tests;i++){
         if(strcmp(only,"all") && strcmp(only,tests[i].nm)) continue;

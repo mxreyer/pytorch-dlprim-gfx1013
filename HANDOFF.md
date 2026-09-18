@@ -1,6 +1,6 @@
 # Handoff: where things stand, what is open
 
-As of 2026-09-15. Nothing here is needed to *use* the patches; the shipped
+As of 2026-09-18. Nothing here is needed to *use* the patches; the shipped
 build is correct and verified. The details behind every line are in
 [OPENCL-PERF.md](OPENCL-PERF.md).
 
@@ -16,9 +16,17 @@ img/s in the
 | occupancy fix only | 972 | 4,496 | 0 bad / 400 sweeps |
 | + atomics-free backward paths | 1,378 | 4,433 | 0 bad / 300 |
 | + four access-pattern fixes | 1,816 | 6,418 | 0 bad / 300 |
-| **+ register prefetch (what ships)** | **2,055** | **7,064** | **0 bad / 300 (Y, dW, dX); BatchNorm within 7e-7 of CPU** |
-| opt-in `DLPRIM_CONV_FP16=1` | 2,987 | 10,279 | conv within ~0.5% of fp32; 16-epoch accuracy unchanged |
+| + register prefetch | 2,055 | 7,064 | 0 bad / 300 (Y, dW, dX); BatchNorm within 7e-7 of CPU |
+| **+ backward LDS padding dropped (what ships)** | **2,244** | **6,774** | **0 bad / 300** |
+| opt-in `DLPRIM_CONV_FP16=1` | 2,768 | 8,346 | conv within ~0.5% of fp32; 16-epoch accuracy unchanged |
 | T4 (Colab), fp32, for scale | 2,294 | 7,217 | |
+
+The last two rows and the one above them were measured on 2026-09-18 in
+`scratch/venv`; everything above that on 2026-09-15 in the notebook image, which
+reads a few percent higher here and ~20% higher on fp16 inference. The rows are
+therefore not a single ladder — the padding patch's own A/B, same binary and
+same session, is 1,993 → 2,244 training and 6,732 → 6,774 inference. README has
+the note.
 
 Everything is on by default on this device (the planes paths select
 themselves wherever there is no native fp32 atomic add; NVIDIA and
@@ -75,9 +83,16 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
   four access-pattern fixes; timing a wrong-but-cheap variant of a stage
   before fixing it turned out to be the fastest way to know what a fix is
   worth.
-- **The patches are a series now** (2026-09-15): `patches/dlprimitives/01`–`08`
+- **LDS residency is measurable** (2026-09-18): `tools/ocl-micro.c occ` sweeps
+  a work-group's `__local` allocation and counts how many run concurrently on
+  a CU. 32 KiB → 2.0, 40 KiB → 1.2, 16 KiB → 3.9. That is what
+  `09-winograd-tr-offset` acts on, and it corrects an assumption in Finding 12
+  that the fp32 kernels were resident 3 to a CU — at 40 KiB they had one each.
+  Finding 12's conclusions are unaffected (LDS was the binding limit either
+  way), but any future occupancy claim should come from this probe.
+- **The patches are a series now** (2026-09-15): `patches/dlprimitives/01`–`09`
   are one patch per upstream report, each built and swept on its own on the
-  way up (README has the per-patch numbers); `09` holds the measurement env
+  way up (README has the per-patch numbers); `10` holds the measurement env
   vars. `build.sh` recreates `scratch/` from the patch files, so any work on
   the kernels should end with `git format-patch` into `patches/`, not with
   edits left in `scratch/`.
@@ -89,7 +104,9 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
    and the activation `dtype` bug (small, unambiguous), plus a proposal for
    the atomics-free paths / access patterns / prefetch that needs the
    author's numbers on NVIDIA and Intel; for `pytorch_dlprim` the half-tensor
-   fixes. Checked 2026-09-15:
+   fixes. The LDS-padding report (2026-09-18) is small but **not
+   independent** — the same define is a loss against the stock backward
+   kernels, so it belongs after the proposal, not before it. Checked 2026-09-15:
    nothing related is filed anywhere, and the `dlprimitives` series applies
    cleanly to upstream HEAD (`b176c15`). Two things about the `dlprimitives`
    maintainer worth knowing: PR #42, AI-generated, was closed after a "who
@@ -108,9 +125,9 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
 3. **Whether the fp16 inner loop should be the default.** A judgement about
    error tolerance, not speed: TF32 says defaults can be lossy, this is 10×
    lossier. Left opt-in.
-4. **The remaining gap.** The three Winograd kernels are 77% of the fp32 step
-   and run at ~40% of ALU peak; a T4 reaches 64% of its paper number where
-   this reaches 46%. The cheap wins are taken. LDS double-buffering and
+4. **The remaining gap.** The three Winograd kernels are 76% of the fp32 step
+   and run at roughly half of ALU peak; a T4 reaches 64% of its paper number
+   where this reaches ~52%. The cheap wins are taken. LDS double-buffering and
    fp16-in/fp32-accumulate were measured and rejected (Finding 12). What is
    left in the kernels is structural — a rewrite, not a tweak. The
    non-convolution 14 ms per step (BatchNorm+ReLU fusion, a fused optimizer)

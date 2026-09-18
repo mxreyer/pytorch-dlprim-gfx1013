@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mxreyer <236478497+mxreyer@users.noreply.github.com>
+Date: Fri, 18 Sep 2026 09:46:42 -0700
+Subject: [PATCH] conv: drop the Winograd transpose padding when it halves LDS
+ residency
+
+A non-zero STRIDE_OFFSET or TR_STRIDE_OFFSET sets PADDING_FACTOR in the
+three Winograd kernels, which allocates 16 extra tile rows of __local:
+(32+32+16)*WG_K*16 floats = 40 KiB per work-group against 32 KiB without.
+AMD devices already take STRIDE_OFFSET=0, so TR_STRIDE_OFFSET=1 alone is
+paying the full 8 KiB.
+
+On a 64 KiB LDS that is exactly the line between two resident work-groups
+per compute unit and one. For the two backward kernels the occupancy is
+worth more than the bank conflicts the padding avoids; the forward kernel
+measures the other way and keeps its padding.
+
+The kernels are unchanged - this only picks the define - and the rule is
+derived from CL_DEVICE_LOCAL_MEM_SIZE, so a device with >= 80 KiB of
+__local (or a non-AMD device, which has STRIDE_OFFSET=1 and pays for the
+padding anyway) keeps the current behaviour.
+
+ResNet-9 training step, batch 128, AMD gfx1013 (40 CU, 64 KiB LDS),
+Mesa 26.1.8 rusticl, median GPU time per kernel over three profiled runs:
+
+    winograd_bwd_filter    19.1 ms -> 14.9 ms
+    winograd_3x3_main_bwd  14.8 ms -> 12.1 ms
+    winograd_3x3_main      14.1 ms    (16.8 ms unpadded - left padded)
+
+which is 60.6 -> 53.8 ms of GPU time per step, and 2,069 -> 2,330 img/s
+on the same step measured without profiling.
+
+Gradients unchanged: the define only moves data within __local.
+---
+ src/core/conv.cpp | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/src/core/conv.cpp b/src/core/conv.cpp
+index dc07b4a..9f46ccc 100644
+--- a/src/core/conv.cpp
++++ b/src/core/conv.cpp
+@@ -244,6 +244,30 @@ namespace core {
+         return e && *e && atoi(e) != 0;
+     }
+ 
++    // TR_STRIDE_OFFSET pads the transpose-stage scratch to keep rows off the
++    // same LDS bank, but any non-zero offset also turns on PADDING_FACTOR in
++    // the kernel, which allocates 16 more tile rows: 40 KiB per work-group
++    // instead of 32 KiB in fp32. On a 64 KiB LDS that is the difference
++    // between two resident work-groups per compute unit and one, and for the
++    // backward kernels the residency is worth more than the bank conflicts.
++    // The existing local_mem_size check below drops the padding when it does
++    // not fit at all; this drops it when it fits but costs half the occupancy.
++    // Measured on an AMD gfx1013 (40 CU, 64 KiB LDS), ResNet-9 step at batch
++    // 128: backward-filter 19.1 -> 14.9 ms, backward-data 14.8 -> 12.1 ms.
++    // Forward is left padded - the same change costs it 14.1 -> 16.8 ms.
++    static bool drop_tr_padding(Context &ctx,int off)
++    {
++        // (XTILES_IN_WG + YTILES_IN_WG) * WG_K * 16 elements, and 16 * WG_K *
++        // 16 more when PADDING_FACTOR is on; see the kernel sources.
++        int elem = conv_fp16() ? 2 : 4;
++        int unpadded = 64 * 8 * 16 * elem;
++        int padded   = 80 * 8 * 16 * elem;
++        if(off != 0) // padding is on regardless of TR_STRIDE_OFFSET
++            return false;
++        int lds = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
++        return lds < 2 * padded && lds >= 2 * unpadded;
++    }
++
+     class Conv2DForwardWinograd : public Conv2DForward {
+     public:
+         virtual char const *algo() const
+@@ -344,6 +368,8 @@ namespace core {
+ 
+             int off = ctx.is_amd() ? 0 : 1;
+             int toff = 1;
++            if(drop_tr_padding(ctx,off))
++                toff = 0;
+             int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
+             if(local_mem_size < 40960) {
+                 off = 0;
+@@ -498,6 +524,8 @@ namespace core {
+             reduce_k_ = k_split_ > 1;
+             int off = ctx.is_amd() ? 0 : 1;
+             int toff = 1;
++            if(drop_tr_padding(ctx,off))
++                toff = 0;
+             int local_mem_size = ctx.device().getInfo<CL_DEVICE_LOCAL_MEM_SIZE>();
+             if(local_mem_size < 40960) {
+                 off = 0;

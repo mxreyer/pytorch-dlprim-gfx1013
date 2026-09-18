@@ -29,8 +29,8 @@ has the T4 runs):
 | | training | inference |
 | --- | ---: | ---: |
 | stock `pytorch_ocl` | 909 | 4,489 |
-| **with these patches** | **2,055** | **7,064** |
-| + opt-in fp16 inner loop (`DLPRIM_CONV_FP16=1`) | 2,987 | 10,279 |
+| **with these patches** | **2,244** | **6,774** |
+| + opt-in fp16 inner loop (`DLPRIM_CONV_FP16=1`) | 2,768 | 8,346 |
 | NVIDIA T4, fp32, for scale | 2,294 | 7,217 |
 
 Accuracy is unchanged throughout. Gradients match CPU references on every
@@ -41,7 +41,7 @@ ResNet-9 layer shape.
 | [OPENCL-PERF.md](OPENCL-PERF.md) | Claude's full investigation: every measurement, dead end and fix. Long by design; the reference for anyone continuing this work. |
 | [HANDOFF.md](HANDOFF.md) | Where things stand, what is still open, the constraints to keep in mind. (For a future Claude session.) |
 | `tools/` | Microbenchmarks (`ocl-micro.c`, `libclc-probe.c`, `fp16-micro.c`), correctness sweeps (`wino-repro.py`, `bn-check.py`, ...), a Mesa-from-source container (`mesa-dev/`). |
-| `upstream/` | Reports ready to file: three bugs and one proposal for `dlprimitives`, one for `pytorch_dlprim`. |
+| `upstream/` | Reports ready to file: four bugs and one proposal for `dlprimitives`, one for `pytorch_dlprim`. |
 | `patches/` | Everything `build.sh` applies, per target; the `dlprimitives` series is one patch per report. |
 
 ## The patches
@@ -49,12 +49,12 @@ ResNet-9 layer shape.
 `patches/<target>/NN-*.patch`, applied in numeric order by `build.sh`.
 
 **`patches/dlprimitives/`** — the `dlprimitives` submodule. `00` is the
-rusticl build fix; `01`–`08` are the upstream-ready changes, one per report
+rusticl build fix; `01`–`09` are the upstream-ready changes, one per report
 in `upstream/`, stacked in the order they were measured (`git format-patch`
 output with the commit message for the PR; `git apply` and `git am` both
-take them); `09` is local only. img/s is the ResNet-9 training step at batch
+take them); `10` is local only. img/s is the ResNet-9 training step at batch
 128 with the series applied up to that patch (`tools/profile-step.py 128 20`,
-2026-09-15).
+2026-09-15; the last two rows 2026-09-18).
 
 | patch | what | report in `upstream/` | img/s after |
 | --- | --- | --- | ---: |
@@ -67,7 +67,8 @@ take them); `09` is local only. img/s is the ResNet-9 training step at batch
 | `06-bn-sums-grid-stride` | Grid-stride BatchNorm reduction instead of one that hit the same cache sets every step | winograd-performance §2 | 1,949 |
 | `07-winograd-prefetch` | Next K step's tiles loaded into registers before the current GEMM | winograd-performance §3 | 2,068 |
 | `08-winograd-fp16` | Opt-in fp16 LDS tiles and packed-fp16 GEMM, fp32 tensors in memory | winograd-performance §4 | 2,062; 2,886 with `DLPRIM_CONV_FP16=1` |
-| `09-local-knobs` | The environment variables and the partials-hash diagnostic used for the measurements | — | 2,061 |
+| `09-winograd-tr-offset` | Transpose-stage LDS padding dropped in the backward kernels, where it was costing a resident work-group per CU; forward keeps it | winograd-lds-padding | 2,330 |
+| `10-local-knobs` | The environment variables and the partials-hash diagnostic used for the measurements | — | 2,330 |
 
 **`patches/pytorch_dlprim/`** — the extension itself.
 
@@ -111,12 +112,17 @@ applies them:
   LDS, packed `v_pk_fma_f16` GEMM, fp32 tensors in memory. Y/dX/dW within
   ~0.5% of fp32 — about 10× looser than NVIDIA's TF32 default, which is why
   it is not the default.
+- **LDS residency** (`09`). Any non-zero padding offset makes the kernels
+  allocate 16 extra tile rows — 40 KiB per work-group instead of 32 — and a
+  40 KiB work-group has a whole CU to itself where a 32 KiB one shares with a
+  second (`tools/ocl-micro.c occ` measures this). The two backward kernels are
+  better off unpadded; the forward kernel is not, and keeps its padding.
 
 Each step was found by profiling and confirmed by first timing a
 wrong-but-cheap variant; the measurements are in OPENCL-PERF.md, Findings 2,
-3, 10, 11 and 12. The benchmark table at the top (real data, 16 epochs) and
-the per-patch table (synthetic step, GPU only) are different measurements
-and differ by a few percent at the same state.
+3, 10, 11, 12 and 13. The benchmark table at the top (real data, 16 epochs,
+CPU-side augmentation) and the per-patch table (synthetic step, GPU only) are
+different measurements and do not track each other exactly.
 
 These kernels are dense enough to expose an undervolted clock governor: with
 the GPU's idle floor at 1000 MHz / 718 mV they produced wrong gradients in 66
@@ -126,7 +132,7 @@ suspecting the code (HANDOFF.md has the procedure).
 
 ### Environment variables
 
-`DLPRIM_CONV_FP16` is added by `patches/dlprimitives/08`, the rest by `09`.
+`DLPRIM_CONV_FP16` is added by `patches/dlprimitives/08`, the rest by `10`.
 An algorithm passed explicitly by the caller
 always wins, so these are inert unless set.
 
@@ -142,16 +148,22 @@ DLPRIM_WINOGRAD_SPLIT_PLANES   0 | 1         backward-filter without atomics (de
 DLPRIM_WINOGRAD_BWD_PLANES     0 | 1         backward-data without atomics    device is NVIDIA or has
                                              cl_ext_float_atomics)
 DLPRIM_WINOGRAD_STRIDE_OFFSET  <n>           LDS padding (default 0 on AMD)
-DLPRIM_WINOGRAD_TR_OFFSET      <n>           LDS padding, transpose stage
+DLPRIM_WINOGRAD_TR_OFFSET      <n>           LDS padding, transpose stage (default 1, but 0 in
+                                             the backward kernels wherever the padding would
+                                             cost a resident work-group - patch 09). Global:
+                                             setting it also moves the forward kernel, which
+                                             wants 1.
 DLPRIM_CONV_FP16               0 | 1         fp16 LDS tiles + packed-fp16 GEMM, fp32 tensors
                                              in/out (default 0). Raises the split-K defaults
                                              to 16 / 64 to keep fp16 sums short. Read at kernel
                                              compile time, so set it before the first convolution.
 ```
 
-Setting both `*_PLANES` to `0` brings back the original emulated-atomic kernels
-(1,167 img/s in `tools/profile-step.py` against 2,061), which is the A/B for
-the planes paths.
+Setting both `*_PLANES` to `0` brings back the original emulated-atomic
+kernels: 1,129 img/s in `tools/profile-step.py` against 2,330, and only with
+`DLPRIM_WINOGRAD_TR_OFFSET=1` — those kernels want the padding that patch `09`
+takes away (792 img/s without). That pair is the A/B for the planes paths, and
+a reminder that the two choices are not independent.
 
 ## Building
 
