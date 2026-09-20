@@ -205,7 +205,7 @@ within run-to-run variance. Inference is untouched, as expected — there is no
 backward-filter kernel in an inference pass. Gradients match CPU to better than
 1e-5 relative for every ResNet-9 layer shape.
 
-`optional/local-knobs.patch` adds environment variables to make these choices
+`10-local-knobs.patch` adds environment variables to make these choices
 measurable instead of assumed — `DLPRIM_CONV_ALGO`, `DLPRIM_CONV_FWD_ALGO`,
 `DLPRIM_CONV_BWD_DATA_ALGO`, `DLPRIM_CONV_BWD_FILTER_ALGO`
 (`auto`|`winograd`|`gemm`|`depthwise_separable`) and `DLPRIM_WINOGRAD_KSPLIT`

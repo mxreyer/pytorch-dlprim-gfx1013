@@ -33,8 +33,8 @@ same change, 60.6 → 53.8 ms, is the tighter number.
 Everything is on by default on this device. The plane-based backward paths
 switch themselves on wherever the GPU has no hardware float atomic add;
 NVIDIA and anything advertising `cl_ext_float_atomics` keep the atomics.
-With the optional knobs patch applied, `DLPRIM_WINOGRAD_BWD_PLANES=0` /
-`_SPLIT_PLANES=0` bring the old emulated-atomic kernels back for comparison.
+`DLPRIM_WINOGRAD_BWD_PLANES=0` / `_SPLIT_PLANES=0` bring the old
+emulated-atomic kernels back for comparison.
 
 ## The one thing to know before debugging a wrong gradient
 
@@ -99,12 +99,10 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
   but any future occupancy claim should come from this probe.
 - **The patches are a series now** (2026-09-15): `patches/dlprimitives/01`–`09`
   are one patch per upstream report, each built and swept on its own on the
-  way up (README has the per-patch numbers). The measurement env vars moved
-  out of the series on 2026-09-18 and now live in
-  `patches/dlprimitives/optional/local-knobs.patch`, which `build.sh` does not
-  apply — apply it by hand to reproduce an A/B. `build.sh` recreates
-  `scratch/` from the patch files, so any work on the kernels should end with
-  `git format-patch` into `patches/`, not with edits left in `scratch/`.
+  way up (README has the per-patch numbers); `10` holds the measurement env
+  vars. `build.sh` recreates `scratch/` from the patch files, so any work on
+  the kernels should end with `git format-patch` into `patches/`, not with
+  edits left in `scratch/`.
 
 ## Open
 
