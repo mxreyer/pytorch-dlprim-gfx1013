@@ -20,32 +20,26 @@ installs, pinned by URL and sha256 in its Dockerfile. To ship a new build: run
 `./build.sh`, tag a release with `pt_ocl.so` attached, then bump the version
 and sha256 there.
 
-Images per second in the
-[bc250-jupyterhub-opencl-k3s benchmark](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s/blob/main/benchmark.py)
-(ResNet-9 on CIFAR-10, batch 128, 16 epochs; its
-[BENCHMARK.md](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s/blob/main/BENCHMARK.md)
-has the T4 runs):
+Images per second, ResNet-9 training step on the GPU at batch 128
+(`tools/profile-step.py`; the per-patch table below has every step in
+between):
 
-| | training | inference |
-| --- | ---: | ---: |
-| stock `pytorch_ocl` | 909 | 4,489 |
-| **with these patches** | **2,212** | **6,802** |
-| + opt-in fp16 inner loop (`DLPRIM_CONV_FP16=1`) | 2,561 | 8,545 |
-| NVIDIA T4, fp32, for scale | 2,294 | 7,217 |
+| | training |
+| --- | ---: |
+| stock `pytorch_ocl` | 915 |
+| **with these patches** | **2,354** |
+| + opt-in fp16 inner loop (`DLPRIM_CONV_FP16=1`) | 2,918 |
 
 Accuracy is unchanged throughout. Gradients match CPU references on every
 ResNet-9 layer shape.
 
-The patched rows are medians of three runs: this benchmark prepares its
-images on the same four CPU cores the training loop needs, so it swings a few
-percent run to run. Compare patches with the GPU-only step below.
 
 | file | description |
 | --- | --- |
 | [OPENCL-PERF.md](OPENCL-PERF.md) | Claude's full investigation: every measurement, dead end and fix. Long by design; the reference for anyone continuing this work. |
 | [HANDOFF.md](HANDOFF.md) | Where things stand, what is still open, the constraints to keep in mind. (For a future Claude session.) |
 | `tools/` | Microbenchmarks (`ocl-micro.c`, `libclc-probe.c`, `fp16-micro.c`), correctness sweeps (`wino-repro.py`, `bn-check.py`, ...), a Mesa-from-source container (`mesa-dev/`). |
-| `upstream/` | Reports ready to file: four bugs and one proposal for `dlprimitives`, one for `pytorch_dlprim`. |
+| `upstream/` | Reports ready to file: five bugs and one proposal for `dlprimitives`, one for `pytorch_dlprim`. |
 | `patches/` | Everything `build.sh` applies, per target; the `dlprimitives` series is one patch per report. |
 
 ## The patches
@@ -53,10 +47,10 @@ percent run to run. Compare patches with the GPU-only step below.
 `patches/<target>/NN-*.patch`, applied in numeric order by `build.sh`.
 
 **`patches/dlprimitives/`** — the `dlprimitives` submodule. `00` is the
-rusticl build fix and `01` the correctness fix it exposes; `02`–`10` are
-the performance changes, stacked in the order they were measured; `11` is
-local only. img/s is the ResNet-9 training step at batch 128 with the
-series applied up to that patch.
+rusticl build fix, `01` the correctness fix it exposes and `02` a second
+correctness fix; `03`–`10` are the performance changes, stacked in the order
+they were measured; `11` is local only. img/s is the ResNet-9 training step
+at batch 128 with the series applied up to that patch.
 
 | patch | what | report in `upstream/` | img/s after |
 | --- | --- | --- | ---: |
@@ -102,7 +96,7 @@ barrier.
 
 ### What the convolution patches do
 
-Convolution is 89% of a ResNet-9 training step, and three quarters of that is
+Convolution is 89% of a ResNet-9 training step, and four fifths of that is
 the backward pass, so that is where the work went. In the order the series
 applies them:
 
@@ -153,9 +147,9 @@ applies them:
 
 Each step was found by profiling and confirmed by first timing a
 wrong-but-cheap variant; the measurements are in OPENCL-PERF.md, Findings 2,
-3, 10, 11, 12 and 13. The benchmark table at the top (real data, 16 epochs,
-images prepared on the CPU) and the per-patch table (synthetic step, GPU only)
-are different measurements and do not track each other exactly.
+3, 10, 11, 12 and 13. The tables here are the synthetic GPU-only step; the
+16-epoch benchmark quoted at the top (real data, images prepared on the CPU)
+is a different measurement and does not track it exactly.
 
 These kernels are dense enough to expose an undervolted clock governor: with
 the GPU's idle floor at 1000 MHz / 718 mV they produced wrong gradients in 66
@@ -193,7 +187,8 @@ DLPRIM_CONV_FP16               0 | 1         fp16 tiles + packed-fp16 multiply, 
 ```
 
 Setting both `*_PLANES` to `0` brings back the original emulated-atomic
-kernels: 1,129 img/s in `tools/profile-step.py` against 2,330, and only with
+kernels: 1,129 img/s in `tools/profile-step.py` against 2,330 for the full
+series in the same session, and only with
 `DLPRIM_WINOGRAD_TR_OFFSET=1` — those kernels want the padding that patch `09`
 takes away (792 img/s without). That pair is the A/B for the planes paths, and
 a reminder that the two choices are not independent.
