@@ -92,23 +92,34 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
   Each CU has a fixed budget of fast on-chip scratch memory, and a work-group
   that asks for more of it means fewer of them run at once. `tools/ocl-micro.c
   occ` sweeps that allocation and counts: 16 KiB → 3.9 work-groups per CU,
-  32 KiB → 2.0, 40 KiB → 1.2. That boundary is what `08-winograd-tr-offset`
+  32 KiB → 2.0, 40 KiB → 1.2. That boundary is what `09-winograd-tr-offset`
   acts on, and it corrects an assumption in Finding 12 that the fp32 kernels
   ran 3 to a CU — at 40 KiB each they had a CU apiece. Finding 12's
   conclusions still hold (scratch memory was the binding limit either way),
   but any future occupancy claim should come from this probe.
-- **The patches are a series now** (2026-09-15): `patches/dlprimitives/01`–`09`
+- **Re-checked after the host update to Linux 7.2.5 / Mesa 26.2.2**
+  (2026-09-21): the shipped build's training step is 2,422 img/s, 3% above
+  the 2,350 the tables were built on, with the same 40 CUs at 2000 MHz. One
+  loose end: pinned, `ocl-micro lds` now reads ~3,200 GB/s rather than the
+  4,902 in the ceilings table, the same under Mesa 26.1.8 in a container, so
+  it is not the compiler. The Winograd kernels, which are LDS-bound, do not
+  reflect it. Unexplained; not worth chasing unless a kernel starts
+  underperforming its own history.
+- **The patches are a series now** (2026-09-15): `patches/dlprimitives/01`–`10`
   are one patch per upstream report, each built and swept on its own on the
-  way up (README has the per-patch numbers); `10` holds the measurement env
-  vars. `build.sh` recreates `scratch/` from the patch files, so any work on
-  the kernels should end with `git format-patch` into `patches/`, not with
+  way up (README has the per-patch numbers); `11` holds the measurement env
+  vars. `01` was inserted on 2026-09-21, which renumbered the rest by one.
+  `build.sh` recreates `scratch/` from the patch files, so any work on the
+  kernels should end with `git format-patch` into `patches/`, not with
   edits left in `scratch/`.
 
 ## Open
 
 1. **File the `upstream/` reports.** Drafted, not yet filed: for
-   `dlprimitives` the `CUSTOM_REDUCE` auto-detection, the split-K heuristic
-   and the activation `dtype` bug (small, unambiguous), plus a proposal for
+   `dlprimitives` the `CUSTOM_REDUCE` auto-detection, the reduction barrier
+   (2026-09-21; the upstream softmax tests fail without it, so file it
+   first), the split-K heuristic and the activation `dtype` bug (small,
+   unambiguous), plus a proposal for
    the atomics-free paths / access patterns / prefetch that needs the
    author's numbers on NVIDIA and Intel; for `pytorch_dlprim` the half-tensor
    fixes. The scratch-padding report (2026-09-18) is small but **not
@@ -154,8 +165,14 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
   Delete it (or point `DLPRIM_CACHE_DIR` at a fresh directory) before
   believing any number, and after any driver-flag experiment. A stale cache
   once measured 478 img/s where a fresh one gave 968, same binary, same GPU.
-- **Warm the GPU before measuring.** It idles at 1000 MHz; a cold single test
-  measures the wrong machine.
+- **Pin the clock for anything short.** The GPU idles at 1000 MHz, and since
+  the 7.2.5 kernel the governor's busy-flag method no longer sees short
+  enqueue-and-wait kernels at all (`gpu_busy_percent` reads 0–1% while they
+  run), so `tools/ocl-micro.c` and anything interactive stays at 1000 MHz
+  unless you pin it. Pipelined training ramps fine. The `SetRange uu 2000
+  2000` / `1000 2000` pair above is the switch. A cold `alu` reads 4,450
+  GFLOP/s where the pinned figure is 8,478; that halving cost a day of
+  chasing a phantom hardware regression on 2026-09-20.
 - **Rare failures need 150–400 sweeps** to say anything, and repeating one
   shape hides them entirely — a wrong result then just matches the previous,
   nearly identical iteration.

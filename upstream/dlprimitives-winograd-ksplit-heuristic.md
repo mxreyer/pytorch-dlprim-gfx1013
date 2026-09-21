@@ -58,7 +58,7 @@ with the launch's z-dimension set to `k_split_` instead of the fixed 8 — the
 kernel already derives its slice from `get_global_size(2)`, so it needs no
 change. Targets of 8, 16 and 32 per CU measured the same as 4 on this device,
 so the constant is not sensitive. Patch:
-`patches/dlprimitives/02-winograd-ksplit-heuristic.patch` in
+`patches/dlprimitives/03-winograd-ksplit-heuristic.patch` in
 https://github.com/mxreyer/pytorch-dlprim-gfx1013.
 
 ## Disclosure

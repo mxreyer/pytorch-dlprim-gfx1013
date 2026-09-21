@@ -41,7 +41,7 @@ looks like it is.
 | # | Finding | Where | Status |
 | - | --- | --- | --- |
 | 1 | `fma()` compiles to a **563-instruction software emulation**, 120× slower than `mad()` | rusticl < 26.2 (never tells libclc the device has hardware fma) | fixed in our kernels (`02-gelu-mad.patch`); native on Mesa 26.2 |
-| 2 | Winograd backward-filter launches **16 work-groups onto 40 CUs** | dlprimitives heuristic | fixed (`patches/dlprimitives/02-winograd-ksplit-heuristic.patch`) |
+| 2 | Winograd backward-filter launches **16 work-groups onto 40 CUs** | dlprimitives heuristic | fixed (`patches/dlprimitives/03-winograd-ksplit-heuristic.patch`) |
 | 3 | Both backward kernels run on **emulated float atomics** — a third of the training step. Removing them is worth **+46%**. The "ACO `s_waitcnt` bug" that kept the fix gated for two weeks was the **clock governor's idle-floor undervolt** (1000 MHz @ 718 mV) | half silicon, half `dlprimitives`, then a config file | **fixed and shipping**: 1,374 img/s, no driver flags; voltage restored to the governor default |
 | 4 | rusticl **misreports** LDS and cache as absent | rusticl device info | no impact on this stack; not pursued |
 | 5 | Throttling / launch overhead / memory bandwidth / wrong conv algorithm | — | **all ruled out** |
@@ -164,7 +164,7 @@ kernel**.
 The image size never enters the formula at all, so the amount of reduction work
 available to split is not considered either.
 
-`patches/dlprimitives/02-winograd-ksplit-heuristic.patch` picks the
+`patches/dlprimitives/03-winograd-ksplit-heuristic.patch` picks the
 split from how many work-groups the launch actually has versus how many CUs
 there are to fill (aiming for ~4 work-groups per CU), and refuses to split
 further than there is K work to divide. Per-call, averaged over 10 steps:
@@ -205,7 +205,7 @@ within run-to-run variance. Inference is untouched, as expected — there is no
 backward-filter kernel in an inference pass. Gradients match CPU to better than
 1e-5 relative for every ResNet-9 layer shape.
 
-`10-local-knobs.patch` adds environment variables to make these choices
+`11-local-knobs.patch` adds environment variables to make these choices
 measurable instead of assumed — `DLPRIM_CONV_ALGO`, `DLPRIM_CONV_FWD_ALGO`,
 `DLPRIM_CONV_BWD_DATA_ALGO`, `DLPRIM_CONV_BWD_FILTER_ALGO`
 (`auto`|`winograd`|`gemm`|`depthwise_separable`) and `DLPRIM_WINOGRAD_KSPLIT`
@@ -256,7 +256,7 @@ denominators match:
 | | GPU time per step |
 | --- | ---: |
 | stock | 137.75 ms |
-| with `patches/dlprimitives/02-winograd-ksplit-heuristic.patch` | 128.32 ms |
+| with `patches/dlprimitives/03-winograd-ksplit-heuristic.patch` | 128.32 ms |
 | …and atomics removed (speed-of-light, incorrect results) | **106.32 ms** |
 
 The atomics cost **22.0 ms, or 17% of GPU time per step**. Strip them and
@@ -614,7 +614,7 @@ And the performance, with `force-waitcnt` gone for good:
 
 **+46% training, inference unchanged** — the number this whole finding said
 was locked behind an upstream compiler fix. The interlock is gone from
-`patches/dlprimitives/03-winograd-no-atomics.patch`; the atomics-free paths are
+`patches/dlprimitives/04-winograd-no-atomics.patch`; the atomics-free paths are
 selected wherever the device has no native fp32 atomic add (not NVIDIA, no
 `cl_ext_float_atomics` — so on every device this repository targets), with
 `DLPRIM_WINOGRAD_BWD_PLANES=0` / `DLPRIM_WINOGRAD_SPLIT_PLANES=0` as the way
@@ -1202,7 +1202,7 @@ heavy kernel is fp32-only: matmul, linear, pooling, softmax, the loss and
 BatchNorm refuse a half tensor; convolution *accepted* one and returned NaN
 (now a `TORCH_CHECK`); `relu`/`tanh`/`sigmoid`/`relu6` on half returned wrong
 values because `activation.cl` was built without its `dtype` define and read
-the halves as floats (fixed in `patches/dlprimitives/01-activation-dtype.patch`;
+the halves as floats (fixed in `patches/dlprimitives/02-activation-dtype.patch`;
 `hardtanh`'s float-vs-half formula and a non-contiguous gradient in
 `hardtanh_backward` in `patches/pytorch_dlprim/01-half-fixes.patch`; checked by
 `tools/act-half.py`); bfloat16 and
@@ -1414,7 +1414,7 @@ LDS footprint and the same residency step; it simply pays more for the bank
 conflicts than it gains from the second work-group. Left measured, not
 explained.
 
-`08-winograd-tr-offset.patch` drops the padding in the two backward
+`09-winograd-tr-offset.patch` drops the padding in the two backward
 constructors when the device's `__local` is large enough for the unpadded
 work-group to double up but not the padded one, which is true on this chip and
 false wherever `STRIDE_OFFSET` is already 1 (every non-AMD device pays for the
@@ -1456,10 +1456,10 @@ kernel. Gradients: 0 bad over 300 `tools/wino-repro.py` sweeps.
 
 ### Reordered, and what that showed
 
-**2026-09-18.** The padding patch moved to `08`, ahead of the opt-in fp16
-loop at `09`, so that everything on by default comes first in the series. It
+**2026-09-18.** The padding patch moved to `09`, ahead of the opt-in fp16
+loop at `10`, so that everything on by default comes first in the series. It
 had to be split slightly to do so: `drop_tr_padding()` asks how large a tile
-element is, which in the old order it could read off `conv_fp16()`. At `08`
+element is, which in the old order it could read off `conv_fp16()`. At `09`
 that helper does not exist yet, so the rule starts out fp32-only and the fp16
 patch extends it.
 
@@ -1468,7 +1468,7 @@ the old order had hidden. The two patches are not additive:
 
 | | old order | new order |
 | --- | ---: | ---: |
-| after `07-winograd-prefetch` | 2,068 | 2,068 |
+| after `08-winograd-prefetch` | 2,068 | 2,068 |
 | after the next patch | 2,062 (fp16) | **2,261** (padding) |
 | after the one after that | **2,330** (padding) | **2,354** (fp16) |
 

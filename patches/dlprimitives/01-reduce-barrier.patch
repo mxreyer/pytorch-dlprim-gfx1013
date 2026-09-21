@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mxreyer <236478497+mxreyer@users.noreply.github.com>
+Date: Mon, 21 Sep 2026 12:16:24 -0700
+Subject: [PATCH] reduce: barrier after reading the fallback reduction's result
+
+REDUCE_USING_OP (the CUSTOM_REDUCE / pre-2.0 path) ends with every
+work-item reading my_reduce[0] after the last barrier of the tree. Nothing
+stops work-item 0 from running ahead into the next reduction and writing
+my_reduce[0] = myval before the slower work-items have read the previous
+result. Any kernel that reduces twice in a row hits it: softmax reduces
+max then sum, and softmax_with_loss, bn_sums, global_pooling and the
+depthwise backward-filter kernel reduce twice as well.
+
+The softmax and log_softmax unit tests fail with CUSTOM_REDUCE=1 without
+this; with it they pass. One extra barrier per reduction; the OpenCL 2.0
+work_group_reduce_* path is unaffected.
+---
+ src/kernels/reduce.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/kernels/reduce.h b/src/kernels/reduce.h
+index 0d4bce8..2c62e01 100644
+--- a/src/kernels/reduce.h
++++ b/src/kernels/reduce.h
+@@ -36,6 +36,7 @@
+             barrier(CLK_LOCAL_MEM_FENCE); \
+         } \
+         myval = my_reduce[0]; \
++        barrier(CLK_LOCAL_MEM_FENCE); /* next reduction may overwrite my_reduce[0] before slow work-items read it */ \
+     } while(0)
+ 
+ #define REDUCE_OP_ADD(x,y) ((x) + (y))
+-- 
+2.55.0
+

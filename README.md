@@ -53,23 +53,25 @@ percent run to run. Compare patches with the GPU-only step below.
 `patches/<target>/NN-*.patch`, applied in numeric order by `build.sh`.
 
 **`patches/dlprimitives/`** — the `dlprimitives` submodule. `00` is the
-rusticl build fix; `01`–`09` are the upstream-ready changes, stacked in
-the order they were measured; `10` is local only. img/s is the ResNet-9
-training step at batch 128 with the series applied up to that patch.
+rusticl build fix and `01` the correctness fix it exposes; `02`–`10` are
+the performance changes, stacked in the order they were measured; `11` is
+local only. img/s is the ResNet-9 training step at batch 128 with the
+series applied up to that patch.
 
 | patch | what | report in `upstream/` | img/s after |
 | --- | --- | --- | ---: |
 | `00-custom-reduce` | Adds values across a work-group the portable way, since rusticl lacks the OpenCL 2.0 built-in for it; without this, softmax, cross-entropy, bias gradients and BatchNorm sums do not compile at all | custom-reduce-autodetect | — |
-| `01-activation-dtype` | Builds the activation kernel for the tensor's own type; relu/tanh/sigmoid/relu6 on a half tensor were reading it as float and returning garbage | activation-half-dtype | 915 (stock) |
-| `02-winograd-ksplit-heuristic` | Decides how far to split the backward-filter work by counting work-groups per compute unit; the old rule left 24 of 40 CUs idle on a 128→128 layer | winograd-ksplit-heuristic | 984 |
-| `03-winograd-no-atomics` | Gives each parallel slice its own scratch plane and sums the planes afterwards, instead of every slice fighting over the same memory through emulated float atomics | winograd-performance §1 | 1,477 |
-| `04-winograd-fwd-filter-layout` | Stores the transformed filters `[C][N]`, so neighbouring lanes read neighbouring addresses | winograd-performance §2 | 1,634 |
-| `05-winograd-bwd-filter-loads` | Points the 32 lanes at neighbouring tiles of one image plane rather than at 32 different planes; vector loads on the edge tiles | winograd-performance §2 | 1,815 |
-| `06-bn-sums-grid-stride` | Spreads the BatchNorm sum across memory instead of walking it in per-lane chunks that hit the same cache sets every step | winograd-performance §2 | 1,949 |
-| `07-winograd-prefetch` | Starts the next slice's loads before the current slice's arithmetic, so the wait for memory overlaps with work | winograd-performance §3 | 2,068 |
-| `08-winograd-tr-offset` | Drops the scratch-tile padding in the backward kernels, where the 8 KiB it costs was worth a second resident work-group per CU; forward keeps it | winograd-lds-padding | 2,261 |
-| `09-winograd-fp16` | Opt-in: half-precision tiles and multiply-accumulate inside the kernel, fp32 tensors in memory | winograd-performance §4 | 2,354; 2,918 with `DLPRIM_CONV_FP16=1` |
-| `10-local-knobs` | The environment variables and the partials-hash diagnostic used for the measurements; inert unless set | — | — |
+| `01-reduce-barrier` | Adds a barrier after the portable reduction hands out its result, so a kernel that reduces twice in a row (softmax: max, then sum) cannot have work-item 0 start the second one and overwrite the first result before slower work-items have read it; the `dlprimitives` softmax and log_softmax tests fail without it | reduce-barrier | — |
+| `02-activation-dtype` | Builds the activation kernel for the tensor's own type; relu/tanh/sigmoid/relu6 on a half tensor were reading it as float and returning garbage | activation-half-dtype | 915 (stock) |
+| `03-winograd-ksplit-heuristic` | Decides how far to split the backward-filter work by counting work-groups per compute unit; the old rule left 24 of 40 CUs idle on a 128→128 layer | winograd-ksplit-heuristic | 984 |
+| `04-winograd-no-atomics` | Gives each parallel slice its own scratch plane and sums the planes afterwards, instead of every slice fighting over the same memory through emulated float atomics | winograd-performance §1 | 1,477 |
+| `05-winograd-fwd-filter-layout` | Stores the transformed filters `[C][N]`, so neighbouring lanes read neighbouring addresses | winograd-performance §2 | 1,634 |
+| `06-winograd-bwd-filter-loads` | Points the 32 lanes at neighbouring tiles of one image plane rather than at 32 different planes; vector loads on the edge tiles | winograd-performance §2 | 1,815 |
+| `07-bn-sums-grid-stride` | Spreads the BatchNorm sum across memory instead of walking it in per-lane chunks that hit the same cache sets every step | winograd-performance §2 | 1,949 |
+| `08-winograd-prefetch` | Starts the next slice's loads before the current slice's arithmetic, so the wait for memory overlaps with work | winograd-performance §3 | 2,068 |
+| `09-winograd-tr-offset` | Drops the scratch-tile padding in the backward kernels, where the 8 KiB it costs was worth a second resident work-group per CU; forward keeps it | winograd-lds-padding | 2,261 |
+| `10-winograd-fp16` | Opt-in: half-precision tiles and multiply-accumulate inside the kernel, fp32 tensors in memory | winograd-performance §4 | 2,354; 2,918 with `DLPRIM_CONV_FP16=1` |
+| `11-local-knobs` | The environment variables and the partials-hash diagnostic used for the measurements; inert unless set | — | — |
 
 **`patches/pytorch_dlprim/`** — the extension itself.
 
@@ -91,19 +93,26 @@ kernels fail to compile with "use of undeclared identifier".
 through shared memory and a barrier, behind `CUSTOM_REDUCE`; `00-custom-reduce`
 turns it on. `tools/libclc-probe.c` checks the feature directly.
 
+That fallback has a race of its own, which nothing with the built-in would
+ever see: after the last barrier every work-item reads the result from slot 0
+of the shared array, and nothing stops work-item 0 from starting the *next*
+reduction and overwriting slot 0 first. Softmax reduces twice back to back
+(max, then sum), and its unit tests fail. `01-reduce-barrier` adds the missing
+barrier.
+
 ### What the convolution patches do
 
 Convolution is 89% of a ResNet-9 training step, and three quarters of that is
 the backward pass, so that is where the work went. In the order the series
 applies them:
 
-- **Occupancy** (`02`). The backward-filter kernel can cut its work into
+- **Occupancy** (`03`). The backward-filter kernel can cut its work into
   slices and spread them over more of the GPU, and a rule decides when that is
   worth doing. The rule compared a count of *work-items* against a core count,
   which on a 40-CU AMD device works out as "split only if there are fewer than
   10 work-groups". A 128→128 layer launches 16, so it ran on 16 compute units
   with 24 idle. It now counts work-groups and aims to give each CU about four.
-- **Atomics** (`03`). Both backward kernels have many work-groups adding into
+- **Atomics** (`04`). Both backward kernels have many work-groups adding into
   the same output values, so they used an atomic add to keep those additions
   from stepping on each other. This GPU has no hardware float atomic add —
   RDNA1 and RDNA2 don't, it arrives with RDNA3 — so each one becomes a retry
@@ -117,7 +126,7 @@ applies them:
   their row and column are odd or even gives four groups whose members never
   touch. Devices with a real float atomic add (NVIDIA, or anything advertising
   `cl_ext_float_atomics`) keep the original path, where atomics are cheap.
-- **Access patterns** (`04`, `05`, `06`). Three places where neighbouring
+- **Access patterns** (`05`, `06`, `07`). Three places where neighbouring
   lanes read far-apart addresses, so each read pulled in a cache line to use a
   few bytes of it. The transformed filters are now stored `[C][N]`, which makes
   the 32 lanes that read one input channel contiguous; backward-filter lanes
@@ -125,11 +134,11 @@ applies them:
   planes, with vector loads on the edges; and the BatchNorm sum walks memory
   with a stride rather than in per-lane chunks that kept landing in the same
   cache sets (13 GB/s out of 359).
-- **Prefetch** (`07`). Each kernel used to load a slice of data, wait for it,
+- **Prefetch** (`08`). Each kernel used to load a slice of data, wait for it,
   multiply, then load the next. It now issues the next slice's loads *before*
   doing the current multiply, so the wait for memory overlaps with arithmetic
   instead of stalling on it.
-- **Scratch padding** (`08`). The kernels pad their tiles in shared on-chip
+- **Scratch padding** (`09`). The kernels pad their tiles in shared on-chip
   memory (LDS) so that rows do not land on the same memory bank. The catch:
   switching any padding on also makes the kernel allocate 16 extra tile rows,
   40 KiB per work-group instead of 32, and that is just over the line where
@@ -137,7 +146,7 @@ applies them:
   half the parallelism (`tools/ocl-micro.c occ` measures the boundary).
   Giving it up to win the second work-group back pays off in the two backward
   kernels and does not in the forward one, which keeps its padding.
-- **fp16 inner loop, opt-in** (`09`). Tiles are converted to half on the way
+- **fp16 inner loop, opt-in** (`10`). Tiles are converted to half on the way
   into shared memory and multiplied two at a time; the tensors in memory stay
   fp32. Y/dX/dW land within ~0.5% of the fp32 result — about 10× looser than
   NVIDIA's TF32 default, which is why it is opt-in rather than on.
@@ -156,7 +165,7 @@ suspecting the code (HANDOFF.md has the procedure).
 
 ### Environment variables
 
-`DLPRIM_CONV_FP16` is added by `patches/dlprimitives/09`, the rest by `10`.
+`DLPRIM_CONV_FP16` is added by `patches/dlprimitives/10`, the rest by `11`.
 An algorithm passed explicitly by the caller always wins, so these are inert
 unless set.
 
@@ -174,7 +183,7 @@ DLPRIM_WINOGRAD_BWD_PLANES     0 | 1         backward-data without atomics    de
 DLPRIM_WINOGRAD_STRIDE_OFFSET  <n>           scratch-tile padding (default 0 on AMD)
 DLPRIM_WINOGRAD_TR_OFFSET      <n>           scratch-tile padding, transpose stage (default 1, but
                                              0 in the backward kernels wherever the padding would
-                                             cost a resident work-group - patch 08). One switch for
+                                             cost a resident work-group - patch 09). One switch for
                                              all three kernels, so setting it also moves the
                                              forward kernel, which wants 1.
 DLPRIM_CONV_FP16               0 | 1         fp16 tiles + packed-fp16 multiply, fp32 tensors
@@ -185,7 +194,7 @@ DLPRIM_CONV_FP16               0 | 1         fp16 tiles + packed-fp16 multiply, 
 
 Setting both `*_PLANES` to `0` brings back the original emulated-atomic
 kernels: 1,129 img/s in `tools/profile-step.py` against 2,330, and only with
-`DLPRIM_WINOGRAD_TR_OFFSET=1` — those kernels want the padding that patch `08`
+`DLPRIM_WINOGRAD_TR_OFFSET=1` — those kernels want the padding that patch `09`
 takes away (792 img/s without). That pair is the A/B for the planes paths, and
 a reminder that the two choices are not independent.
 

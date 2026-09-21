@@ -41,7 +41,9 @@ built-ins are simply not there.
 
 `reduce.h` already contains a fallback that computes the same reductions
 through `__local` memory and `barrier()`, in plain OpenCL 1.2, behind
-`CUSTOM_REDUCE`. It works on every device. It is only off by default.
+`CUSTOM_REDUCE`. It works on every device. It is only off by default. (It has
+one race between back-to-back reductions, reported separately with a one-line
+fix; the softmax tests catch it.)
 
 ## Suggested fix
 

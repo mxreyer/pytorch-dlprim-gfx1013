@@ -32,7 +32,7 @@ cl::Program const &prog = gpu::Cache::instance().get_program(ctx, "activation",
 with a `DLPRIM_CHECK` that the input and output dtypes match. In
 `activation_diff` the `beta` argument is then better taken as `float` and cast
 inside the kernel, since the host passes a float regardless of the tensor
-type. Patch: `patches/dlprimitives/01-activation-dtype.patch` in
+type. Patch: `patches/dlprimitives/02-activation-dtype.patch` in
 https://github.com/mxreyer/pytorch-dlprim-gfx1013. With it, all four
 activations on half match the CPU forward and backward to fp16 precision
 (sigmoid within 5e-4, the rest exactly).
