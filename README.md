@@ -176,16 +176,13 @@ DLPRIM_CONV_FP16               0 | 1         fp16 tiles + packed-fp16 multiply, 
                                              convolution.
 ```
 
-Setting both `*_PLANES` to `0` puts the emulated-atomic backward kernels back,
-the ones patch `04` replaced, with the rest of the series still on — the A/B
-for that patch. It costs most of the series: 1,129 img/s in
-`tools/profile-step.py` against 2,330 for the full series in the same session.
-Reproducing even that much needs `DLPRIM_WINOGRAD_TR_OFFSET=1` as well; the
-atomic kernels stall in their compare-and-swap loop rather than on occupancy,
-so they want the scratch padding patch `09` gives up and fall to 792 img/s
-without it. The two knobs are not independent: the right padding follows from
-which kernel is running, not from the device. (The A/B in `OPENCL-PERF.md`
-reverts the split-K heuristic too, so its numbers are 1,171 and 849.)
+Setting both `*_PLANES` to `0` puts the emulated-atomic backward kernels
+back, with the rest of the series still on. This brings us down to 1,129
+img/s in `tools/profile-step.py` against 2,330 img/s for the full
+series. Note that the first number needs `DLPRIM_WINOGRAD_TR_OFFSET=1`;
+the atomic kernels stall in their compare-and-swap loop rather than on
+occupancy. Without the scratch padding patch `09` gives up, we fall to
+792 img/s.
 
 ## Building
 
