@@ -1,6 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: mxreyer <236478497+mxreyer@users.noreply.github.com>
-Date: Tue, 15 Sep 2026 11:24:55 -0700
 Subject: [PATCH] conv: BC-250 investigation knobs (local, not for upstream)
 
 Environment overrides used for the measurements in this repository:
@@ -188,8 +187,8 @@ index 50b5f7f..63d08f8 100644
 +            }
 +            else {
 +                // aim for >= 4 work-groups per CU so the tail is cheap. More
-+                // splitting does not help (measured 2026-09-10: targets of 8,
-+                // 16 and 32 per CU, caps to 64, all within noise of this), the
++                // splitting does not help (measured: targets of 8, 16 and 32
++                // per CU, caps to 64, all within noise of this), the
 +                // kernel is not short of work-groups. Overridable for
 +                // measurement: DLPRIM_WINOGRAD_KSPLIT_TARGET (per CU, default 4),
 +                // DLPRIM_WINOGRAD_KSPLIT_MAX (cap, default 16).

@@ -1,6 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: mxreyer <236478497+mxreyer@users.noreply.github.com>
-Date: Mon, 21 Sep 2026 12:16:24 -0700
 Subject: [PATCH] reduce: barrier after reading the fallback reduction's result
 
 REDUCE_USING_OP (the CUSTOM_REDUCE / pre-2.0 path) ends with every

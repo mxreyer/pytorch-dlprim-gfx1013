@@ -1,6 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: mxreyer <236478497+mxreyer@users.noreply.github.com>
-Date: Tue, 15 Sep 2026 11:14:34 -0700
 Subject: [PATCH] conv: pick the Winograd backward-filter split-K from
  work-groups per CU
 

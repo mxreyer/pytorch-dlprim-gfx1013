@@ -1,6 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: mxreyer <236478497+mxreyer@users.noreply.github.com>
-Date: Tue, 15 Sep 2026 11:18:54 -0700
 Subject: [PATCH] winograd_bwd_filter: coalesce the tile loads
 
 Two changes to how winconv_3x3_bwd_filter reads its inputs:

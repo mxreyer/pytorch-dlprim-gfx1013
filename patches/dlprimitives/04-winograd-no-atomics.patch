@@ -1,6 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: mxreyer <236478497+mxreyer@users.noreply.github.com>
-Date: Tue, 15 Sep 2026 11:16:53 -0700
 Subject: [PATCH] conv: Winograd backward kernels without atomic_addf where it
  is emulated
 

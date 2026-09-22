@@ -3,9 +3,9 @@
 Correctness sweep for dlprimitives' Winograd backward kernels on ocl:0.
 
 Runs the six ResNet-9 3x3 layer shapes forward+backward N times and compares
-Y/dW/dX against cached CPU references. The atomics-free backward paths are the
-default since 2026-09-10, so this is the check that they, and anything built on
-them, still produce the gradients the CPU does.
+Y/dW/dX against cached CPU references. The atomics-free backward paths are on
+by default, so this is the check that they, and anything built on them, still
+produce the gradients the CPU does.
 
   # what ships. Expect 0 bad.
   RUSTICL_ENABLE=radeonsi python3 tools/wino-repro.py 300

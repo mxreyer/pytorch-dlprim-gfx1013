@@ -1,6 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: mxreyer <236478497+mxreyer@users.noreply.github.com>
-Date: Tue, 15 Sep 2026 11:23:00 -0700
 Subject: [PATCH] winograd: optional fp16 inner loop (DLPRIM_CONV_FP16=1)
 
 Behind an environment variable, off by default: the three Winograd kernels
