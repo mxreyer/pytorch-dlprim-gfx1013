@@ -148,8 +148,7 @@ applies them:
 ### Environment variables
 
 `DLPRIM_CONV_FP16` is added by `patches/dlprimitives/10`, the rest by `11`.
-An algorithm passed explicitly by the caller always wins, so these are inert
-unless set.
+These are read only when the caller asks for auto; an explicitly passed algorithm wins. Unset, they change nothing.
 
 ```
 DLPRIM_CONV_ALGO               auto | winograd | gemm | depthwise_separable
