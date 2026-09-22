@@ -145,10 +145,6 @@ applies them:
   fp32. Y/dX/dW land within ~0.5% of the fp32 result — about 10× looser than
   NVIDIA's TF32 default, which is why it is opt-in rather than on.
 
-Each step was found by profiling and confirmed by first timing a
-wrong-but-cheap variant; the measurements are in OPENCL-PERF.md, Findings 2,
-3, 10, 11, 12 and 13.
-
 ### Environment variables
 
 `DLPRIM_CONV_FP16` is added by `patches/dlprimitives/10`, the rest by `11`.
