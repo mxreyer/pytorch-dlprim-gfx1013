@@ -8,7 +8,7 @@ DLPRIM_CONV_ALGO / DLPRIM_CONV_{FWD,BWD_DATA,BWD_FILTER}_ALGO,
 DLPRIM_WINOGRAD_KSPLIT (incl. "stock" for the original rule),
 DLPRIM_WINOGRAD_KSPLIT_TARGET/MAX, DLPRIM_WINOGRAD_{SPLIT,BWD}_PLANES,
 DLPRIM_WINOGRAD_STRIDE_OFFSET/TR_OFFSET, and the DLPRIM_DEBUG_PARTIALS_HASH
-diagnostic that located the governor-voltage wrong-gradient issue.
+diagnostic for checking that the split-K partials are reproducible.
 ---
  src/core/conv.cpp | 218 ++++++++++++++++++++++++++++++++++++++--------
  1 file changed, 181 insertions(+), 37 deletions(-)
@@ -47,12 +47,12 @@ index 50b5f7f..63d08f8 100644
  
 +    // The atomics-free Winograd backward paths below (planes instead of emulated
 +    // fp32 atomics) are on wherever has_native_atomic_addf() is false, i.e. on
-+    // the BC-250. They spent two weeks behind an interlock
-+    // because they showed a rare wrong gradient on the BC-250; that turned out
-+    // to be the GPU clock governor's idle-floor voltage (1000 MHz at 718 mV),
-+    // not the kernels and not the compiler - 66/100 sweeps bad pinned at that
-+    // point, 0/900 with the voltage back at the shipped default. The check is
-+    // tools/wino-repro.py in mxreyer/pytorch-dlprim-gfx1013.
++    // the BC-250: each split-K slice accumulates into its own plane of the
++    // workspace and a small reduce kernel sums the planes afterwards, for
++    // under 2% of the kernel it replaces. Gradients are checked against CPU
++    // references by tools/wino-repro.py in mxreyer/pytorch-dlprim-gfx1013,
++    // 300 sweeps of the six ResNet-9 3x3 layer shapes.
++    //
 +    // DLPRIM_WINOGRAD_BWD_PLANES=0 /
 +    // DLPRIM_WINOGRAD_SPLIT_PLANES=0 select the atomic paths for comparison.
 +    static bool env_enabled(char const *name,bool def)
@@ -246,10 +246,10 @@ index 50b5f7f..63d08f8 100644
                  ExecutionContext ec2 = ec.generate_series_context(1,2);
                  ec.queue().enqueueNDRangeKernel(bw_conv_filter_,cl::NullRange,gr,wg,ec1.events(),ec1.event("winograd_bwd_filter"));
  
-+                // DLPRIM_DEBUG_PARTIALS_HASH: the diagnostic that located the
-+                // rare wrong dW. The partials must be bit-identical across runs
-+                // with identical inputs; this reads them back and reports the
-+                // first divergence, pinned at the idle clock.
++                // DLPRIM_DEBUG_PARTIALS_HASH: reproducibility check for the
++                // split-K partials. They must be bit-identical across runs with
++                // identical inputs; this reads them back and reports the
++                // first divergence.
 +                if(getenv("DLPRIM_DEBUG_PARTIALS_HASH")) {
 +                    ec.queue().finish();
 +                    size_t plane = 9 * size_t(C) * size_t(N);

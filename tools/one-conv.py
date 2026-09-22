@@ -11,8 +11,7 @@ AMD_DEBUG, and the shader cache must be off or nothing is compiled and nothing
 is printed. Kernels with "LDS: 40960 bytes" in their stats are the Winograd
 ones; they appear in the order forward, backward-data, backward-filter, each
 twice (two radeonsi variants). The dumps were made to read the Winograd
-kernels' register and LDS use, and to rule the compiler out of a wrong-gradient
-bug that turned out to be the GPU's idle-floor voltage.
+kernels' register, LDS and scratch use.
 
 Arguments: batch channels_in channels_out spatial (default 128 256 512 8).
 

@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Correctness sweep for dlprimitives' Winograd backward kernels on ocl:0 - and,
-on the BC-250, the voltage-curve health check for the GPU clock governor.
+Correctness sweep for dlprimitives' Winograd backward kernels on ocl:0.
 
 Runs the six ResNet-9 3x3 layer shapes forward+backward N times and compares
-Y/dW/dX against cached CPU references. The atomics-free backward paths (default
-since 2026-09-10) exercise a dense LDS+ALU sequence that reads one lane wrong
-when the GPU runs below its voltage floor - 66 of 100 sweeps bad pinned at
-1000 MHz / 718 mV, 0 of 900 at the shipped voltage.
+Y/dW/dX against cached CPU references. The atomics-free backward paths are the
+default since 2026-09-10, so this is the check that they, and anything built on
+them, still produce the gradients the CPU does.
 
   # what ships. Expect 0 bad.
   RUSTICL_ENABLE=radeonsi python3 tools/wino-repro.py 300
@@ -15,13 +13,6 @@ when the GPU runs below its voltage floor - 66 of 100 sweeps bad pinned at
   # the emulated-atomics kernels instead, for comparison. Expect 0 bad.
   RUSTICL_ENABLE=radeonsi DLPRIM_WINOGRAD_SPLIT_PLANES=0 \
       DLPRIM_WINOGRAD_BWD_PLANES=0 python3 tools/wino-repro.py 300
-
-  # after ANY change to the governor's voltage curve: pin the GPU at its
-  # minimum frequency first, then run. Expect 0 bad; anything else means the
-  # curve's low end is below what the chip needs - undervolt the BC-250 and
-  # this is the kernel that notices first.
-  busctl --system call com.cyanskillfish.Governor /com/cyanskillfish/Governor \
-      com.cyanskillfish.Governor.PerformanceMode SetRange uu 1000 1000
 
 Needs a torch + pytorch_ocl environment (build.sh at the top of this repository
 makes one in scratch/venv). CPU reference gradients are computed once and

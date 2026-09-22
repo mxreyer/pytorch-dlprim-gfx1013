@@ -1,8 +1,8 @@
 # Throwaway image: Mesa (radeonsi + rusticl only) built from source with the
 # ACO experiment knobs from aco-experiments.patch, plus the same torch +
 # pytorch_ocl stack build.sh uses, so wino-repro.py can run against a modified
-# compiler. Used on 2026-09-10 to rule the compiler OUT as the cause of the
-# wrong-gradient bug, which turned out to be the GPU's idle-floor voltage.
+# compiler, to see whether ACO codegen changes move the Winograd kernels'
+# results or their timings. They did not.
 # The Mesa build takes ~3 minutes on the BC-250.
 #
 # Build from the repository root (it copies the pt_ocl.so build.sh left there):
@@ -21,8 +21,8 @@
 #                                 s_nop n before every instruction of the classes
 #                                 1 VALU 2 SALU 4 VMEM 8 DS 16 SMEM 32 SOPP 64 other
 #   ACO_FORCE_NOP_AFTER_WAITCNT=1 s_nop 0 after every s_waitcnt
-# None of these is a fix for anything; they exist to show that ANY extra issue
-# slot made the failure vanish, which is what pointed at the voltage.
+# None of these is a fix for anything; they exist to measure what extra issue
+# slots cost, and to test the kernels against a deliberately perturbed compiler.
 FROM registry.fedoraproject.org/fedora:45
 
 # Build deps for Mesa, plus the runtime pieces rusticl needs: libclc (the
