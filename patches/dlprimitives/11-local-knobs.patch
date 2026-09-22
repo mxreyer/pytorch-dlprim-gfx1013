@@ -3,7 +3,7 @@ From: mxreyer <236478497+mxreyer@users.noreply.github.com>
 Date: Tue, 15 Sep 2026 11:24:55 -0700
 Subject: [PATCH] conv: BC-250 investigation knobs (local, not for upstream)
 
-Environment overrides used for the measurements in OPENCL-PERF.md:
+Environment overrides used for the measurements in this repository:
 DLPRIM_CONV_ALGO / DLPRIM_CONV_{FWD,BWD_DATA,BWD_FILTER}_ALGO,
 DLPRIM_WINOGRAD_KSPLIT (incl. "stock" for the original rule),
 DLPRIM_WINOGRAD_KSPLIT_TARGET/MAX, DLPRIM_WINOGRAD_{SPLIT,BWD}_PLANES,
@@ -51,8 +51,8 @@ index 50b5f7f..63d08f8 100644
 +    // because they showed a rare wrong gradient on the BC-250; that turned out
 +    // to be the GPU clock governor's idle-floor voltage (1000 MHz at 718 mV),
 +    // not the kernels and not the compiler - 66/100 sweeps bad pinned at that
-+    // point, 0/900 with the voltage back at the shipped default. See
-+    // OPENCL-PERF.md, Finding 3, in mxreyer/pytorch-dlprim-gfx1013.
++    // point, 0/900 with the voltage back at the shipped default. The check is
++    // tools/wino-repro.py in mxreyer/pytorch-dlprim-gfx1013.
 +    // DLPRIM_WINOGRAD_BWD_PLANES=0 /
 +    // DLPRIM_WINOGRAD_SPLIT_PLANES=0 select the atomic paths for comparison.
 +    static bool env_enabled(char const *name,bool def)
@@ -249,7 +249,7 @@ index 50b5f7f..63d08f8 100644
 +                // DLPRIM_DEBUG_PARTIALS_HASH: the diagnostic that located the
 +                // rare wrong dW. The partials must be bit-identical across runs
 +                // with identical inputs; this reads them back and reports the
-+                // first divergence. See OPENCL-PERF.md, Finding 3.
++                // first divergence, pinned at the idle clock.
 +                if(getenv("DLPRIM_DEBUG_PARTIALS_HASH")) {
 +                    ec.queue().finish();
 +                    size_t plane = 9 * size_t(C) * size_t(N);

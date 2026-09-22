@@ -2,7 +2,7 @@
 # ACO experiment knobs from aco-experiments.patch, plus the same torch +
 # pytorch_ocl stack build.sh uses, so wino-repro.py can run against a modified
 # compiler. Used on 2026-09-10 to rule the compiler OUT as the cause of the
-# wrong-gradient bug (OPENCL-PERF.md, Finding 3, "It was the voltage").
+# wrong-gradient bug, which turned out to be the GPU's idle-floor voltage.
 # The Mesa build takes ~3 minutes on the BC-250.
 #
 # Build from the repository root (it copies the pt_ocl.so build.sh left there):
@@ -34,7 +34,7 @@ RUN dnf -y install dnf5-plugins && dnf -y builddep mesa \
  && dnf clean all
 
 # Fedora's libclc-spirv 22.1.8 cannot link sin()/cos()/fma() (an empty
-# __clc_flush_denormal_if_not_supported; OPENCL-PERF.md, Finding 8). Mesa's
+# __clc_flush_denormal_if_not_supported). Mesa's
 # fork ships fixed drop-in binaries for the same LLVM.
 ARG MESA_LIBCLC_VER=22.1.8.3
 ARG MESA_LIBCLC_URL=https://gitlab.freedesktop.org/api/v4/projects/27606/packages/generic/mesa-libclc/${MESA_LIBCLC_VER}

@@ -8,3 +8,6 @@ __pycache__/
 *.pyc
 # plain-language write-up, kept local
 /PERF-EXPLAINED.md
+# investigation notes and session handoff, kept local
+/OPENCL-PERF.md
+/HANDOFF.md

@@ -6,7 +6,8 @@ on the BC-250, the voltage-curve health check for the GPU clock governor.
 Runs the six ResNet-9 3x3 layer shapes forward+backward N times and compares
 Y/dW/dX against cached CPU references. The atomics-free backward paths (default
 since 2026-09-10) exercise a dense LDS+ALU sequence that reads one lane wrong
-when the GPU runs below its voltage floor; see OPENCL-PERF.md, Finding 3.
+when the GPU runs below its voltage floor - 66 of 100 sweeps bad pinned at
+1000 MHz / 718 mV, 0 of 900 at the shipped voltage.
 
   # what ships. Expect 0 bad.
   RUSTICL_ENABLE=radeonsi python3 tools/wino-repro.py 300
@@ -17,8 +18,8 @@ when the GPU runs below its voltage floor; see OPENCL-PERF.md, Finding 3.
 
   # after ANY change to the governor's voltage curve: pin the GPU at its
   # minimum frequency first, then run. Expect 0 bad; anything else means the
-  # curve's low end is below what the chip needs (HANDOFF.md, "The one thing
-  # to know before debugging a wrong gradient").
+  # curve's low end is below what the chip needs - undervolt the BC-250 and
+  # this is the kernel that notices first.
   busctl --system call com.cyanskillfish.Governor /com/cyanskillfish/Governor \
       com.cyanskillfish.Governor.PerformanceMode SetRange uu 1000 1000
 

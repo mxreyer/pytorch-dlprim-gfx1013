@@ -1,5 +1,5 @@
 // ocl-micro.c - OpenCL microbenchmarks used to characterise the BC-250's
-// compute path (rusticl -> radeonsi -> amdgpu, gfx1013). See OPENCL-PERF.md.
+// compute path (rusticl -> radeonsi -> amdgpu, gfx1013). See README.md.
 //
 //   gcc -O2 -o ocl-micro tools/ocl-micro.c -lOpenCL
 //   RUSTICL_ENABLE=radeonsi ./ocl-micro [test]

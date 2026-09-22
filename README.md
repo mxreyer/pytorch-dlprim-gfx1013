@@ -9,8 +9,7 @@
 Patches and a build script that make
 [pytorch_dlprim](https://github.com/artyom-beilis/pytorch_dlprim) (`pytorch_ocl`,
 the OpenCL backend for PyTorch) work correctly and run fast on the AsRock
-BC-250's gfx1013 GPU under Mesa's rusticl driver — plus the investigation
-that got there.
+BC-250's gfx1013 GPU under Mesa's rusticl driver.
 
 The `pt_ocl.so` attached to each
 [release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases) of this
@@ -36,8 +35,6 @@ ResNet-9 layer shape.
 
 | file | description |
 | --- | --- |
-| [OPENCL-PERF.md](OPENCL-PERF.md) | Claude's full investigation: every measurement, dead end and fix. Long by design; the reference for anyone continuing this work. |
-| [HANDOFF.md](HANDOFF.md) | Where things stand, what is still open, the constraints to keep in mind. (For a future Claude session.) |
 | `tools/` | Microbenchmarks (`ocl-micro.c`, `libclc-probe.c`, `fp16-micro.c`), correctness sweeps (`wino-repro.py`, `bn-check.py`, ...), a Mesa-from-source container (`mesa-dev/`). |
 | `upstream/` | Reports ready to file: five bugs and two proposals for `dlprimitives`, one for `pytorch_dlprim`. |
 | `patches/` | Everything `build.sh` applies, per target; the `dlprimitives` series is one patch per report. |
@@ -244,7 +241,7 @@ AsRock BC-250 (gfx1013, 40 CU, 2.0 GHz, 16 GB unified), Linux 7.1, Mesa
 26.1.8 (Fedora 44) on the host and Mesa 26.2.2 (Fedora 45) in containers, LLVM
 22.1.8, `RUSTICL_ENABLE=radeonsi`. On Mesa 26.1 the system libclc also cannot
 link `sin()`/`cos()` (so `torch.randn` on the device fails); Mesa's own libclc
-fork fixes that — see OPENCL-PERF.md, Finding 8.
+fork fixes that; `tools/mesa-dev/` builds an image with it.
 
 ---
 

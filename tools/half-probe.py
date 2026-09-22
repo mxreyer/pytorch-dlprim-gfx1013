@@ -1,5 +1,6 @@
 # Which half/bfloat16 operations work in pytorch_ocl today, with error vs CPU.
-# Needs torch + pytorch_ocl (build.sh makes a venv in scratch/venv). The inventory behind OPENCL-PERF.md Finding 11.
+# Needs torch + pytorch_ocl (build.sh makes a venv in scratch/venv). The inventory behind
+# upstream/dlprimitives-winograd-fp16-inner-loop.md.
 import torch, pytorch_ocl, traceback  # noqa
 d='ocl:0'
 def t(name, fn):

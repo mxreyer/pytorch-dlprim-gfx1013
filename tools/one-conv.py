@@ -10,8 +10,9 @@ Mesa needs BOTH a stage flag ("cs") and a type flag ("asm", "nir", "aco" ...) in
 AMD_DEBUG, and the shader cache must be off or nothing is compiled and nothing
 is printed. Kernels with "LDS: 40960 bytes" in their stats are the Winograd
 ones; they appear in the order forward, backward-data, backward-filter, each
-twice (two radeonsi variants). See OPENCL-PERF.md, Finding 3, "It was the
-voltage", for what the dumps were used for.
+twice (two radeonsi variants). The dumps were made to read the Winograd
+kernels' register and LDS use, and to rule the compiler out of a wrong-gradient
+bug that turned out to be the GPU's idle-floor voltage.
 
 Arguments: batch channels_in channels_out spatial (default 128 256 512 8).
 

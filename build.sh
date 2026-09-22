@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rebuild pytorch_ocl (pytorch_dlprim) with the gfx1013 patches applied.
-# See README.md for what they do and OPENCL-PERF.md for the measurements.
+# See README.md for what they do and what they are worth.
 #
 # Self-contained: run from anywhere. Builds a Python 3.12 venv in ./scratch
 # (gitignored) with torch 2.4.0 + the pytorch_ocl 0.2.0 wheel, fetches the

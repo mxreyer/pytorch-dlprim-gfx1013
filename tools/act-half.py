@@ -1,6 +1,6 @@
 # Activation forward/backward (relu, tanh, sigmoid, relu6) on ocl:0 vs CPU, in
 # float32 and float16. Expect OK on every line; the half rows were wrong before
-# the dtype define reached the activation kernel (OPENCL-PERF.md, Finding 11).
+# the dtype define reached the activation kernel (patches/dlprimitives/02).
 import torch, pytorch_ocl  # noqa
 d='ocl:0'
 x=torch.randn(1000,257)

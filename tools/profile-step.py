@@ -9,8 +9,8 @@ scratch/venv):
 
 Profiling forces per-kernel events and stretches the step by ~50%, so take the
 wall-clock number from an unprofiled run and only the breakdown from prof.csv
-(columns: section, kernel, start, end, duration in ms). Used for OPENCL-PERF.md
-Finding 10; see there for how to read it. Synthetic data, so no CPU-side
+(columns: section, kernel, start, end, duration in ms). This is the harness
+behind the per-patch img/s table in README.md. Synthetic data, so no CPU-side
 augmentation - this measures the GPU step alone.
 
 MIT License, Copyright (c) 2026 mxreyer.

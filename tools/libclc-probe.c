@@ -3,9 +3,9 @@
 //   gcc -O2 -o libclc-probe tools/libclc-probe.c -lOpenCL
 //   RUSTICL_ENABLE=radeonsi ./libclc-probe
 //
-// Answers, in one run, the libclc questions (HANDOFF.md, "Done, for the
-// record"; settled with this probe: warning gone with the fork, no collectives with either
-// libclc, fma() hardware from Mesa 26.2 on regardless of libclc):
+// Answers, in one run, the three libclc questions this repository ran into
+// (settled with this probe: warning gone with the fork, no collectives with
+// either libclc, fma() hardware from Mesa 26.2 on regardless of libclc):
 //
 //   1. Is the "Patched Mesa libclc" present?  (rusticl prints its warning to
 //      stderr on the first CL call if not - nothing else to check.)
@@ -16,7 +16,7 @@
 //   3. Is fma() a hardware instruction or libclc's __clc_sw_fma emulation?
 //      Times an fma() loop against the same loop written with mad(). Hardware
 //      fma is ~1x mad; the software path measured ~120x in the ocl-micro
-//      loop, 15-18x in this shorter one (OPENCL-PERF.md, Finding 1).
+//      loop, 15-18x in this shorter one.
 //
 // Exit status is 0 regardless; read the output.
 //
