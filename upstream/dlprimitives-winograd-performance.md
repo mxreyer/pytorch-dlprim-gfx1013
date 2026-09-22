@@ -6,9 +6,9 @@ discussion first, then PRs
 
 ## Summary
 
-Profiling ResNet-9 training on an RDNA1 device (AMD BC-250, gfx1013, 40 CU,
-Mesa rusticl) found that 89% of a step is convolution and 77% is the three
-Winograd kernels. Five changes to them take the step from 972 img/s (after the
+Profiling ResNet-9 training on an AMD BC-250 (gfx1013, 40 CU, Mesa rusticl)
+found that 89% of a step is convolution and 77% is the three Winograd
+kernels. Five changes to them take the step from 972 img/s (after the
 split-K fix filed separately) to 2,055, with gradients matching CPU references
 over 900 sweeps of the six layer shapes. They are a stacked series of six
 patches, one per item below, in `patches/dlprimitives/04`–`08` and `10` at

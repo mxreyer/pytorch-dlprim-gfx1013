@@ -176,6 +176,15 @@ be validated the same way. Full account: OPENCL-PERF.md, Finding 3.
 - **Rare failures need 150–400 sweeps** to say anything, and repeating one
   shape hides them entirely — a wrong result then just matches the previous,
   nearly identical iteration.
+- **gfx1013 is neither RDNA1 nor RDNA2.** The BC-250's GPU is PS5-lineage
+  silicon and sits between the two, so a feature cannot be assumed from a
+  generation name. It takes no GFX10.3 instruction (`v_fmac_legacy_f32`
+  assembles for gfx1030, not for gfx1013), it has the RDNA2 ray-tracing
+  instruction that gfx1010–gfx1012 lack (`image_bvh_intersect_ray`), and it
+  lacks the dot-product instructions that gfx1011, gfx1012 and gfx1030 all
+  have (`v_dot2c_f32_f16`). `echo '<insn>' | llvm-mc -arch=amdgcn
+  -mcpu=gfx1013` settles any such question in a second. These docs say
+  gfx1013 rather than a generation for that reason.
 - **Never replace the host's system Mesa or libclc** while anything else
   depends on the GPU. Build to a local prefix or test in a container.
 

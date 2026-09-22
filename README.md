@@ -108,10 +108,10 @@ applies them:
   with 24 idle. It now counts work-groups and aims to give each CU about four.
 - **Atomics** (`04`). Both backward kernels have many work-groups adding into
   the same output values, so they used an atomic add to keep those additions
-  from stepping on each other. This GPU has no hardware float atomic add —
-  RDNA1 and RDNA2 don't, it arrives with RDNA3 — so each one becomes a retry
-  loop: read the value, add to it, try to write it back, start over if another
-  lane got there first. That loop was 39% of the backward-filter kernel. But
+  from stepping on each other. This GPU has no hardware float atomic add — no
+  RDNA GPU before RDNA3 does — so each one becomes a retry loop: read the
+  value, add to it, try to write it back, start over if another lane got
+  there first. That loop was 39% of the backward-filter kernel. But
   the atomics were only guarding collisions *between* the parallel slices;
   inside one slice every output has exactly one writer. Each slice now writes
   into its own plane of scratch memory and a small second kernel adds the
