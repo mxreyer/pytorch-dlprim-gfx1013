@@ -158,19 +158,22 @@ DLPRIM_CONV_BWD_FILTER_ALGO    (same, backward-filter only)
 DLPRIM_WINOGRAD_KSPLIT         stock | <n>   stock = the original heuristic
 DLPRIM_WINOGRAD_KSPLIT_TARGET  <n>           work-groups per CU to aim for (default 4)
 DLPRIM_WINOGRAD_KSPLIT_MAX     <n>           split-K cap (default 16)
-DLPRIM_WINOGRAD_SPLIT_PLANES   0 | 1         backward-filter without atomics (default 1 unless the
-DLPRIM_WINOGRAD_BWD_PLANES     0 | 1         backward-data without atomics    device is NVIDIA or has
+DLPRIM_WINOGRAD_SPLIT_PLANES   0 | 1         backward-filter without atomics (default 1
+                                             unless the device is NVIDIA or has
                                              cl_ext_float_atomics)
+DLPRIM_WINOGRAD_BWD_PLANES     0 | 1         backward-data without atomics
 DLPRIM_WINOGRAD_STRIDE_OFFSET  <n>           scratch-tile padding (default 0 on AMD)
-DLPRIM_WINOGRAD_TR_OFFSET      <n>           scratch-tile padding, transpose stage (default 1, but
-                                             0 in the backward kernels wherever the padding would
-                                             cost a resident work-group - patch 09). One switch for
-                                             all three kernels, so setting it also moves the
-                                             forward kernel, which wants 1.
+DLPRIM_WINOGRAD_TR_OFFSET      <n>           scratch-tile padding, transpose stage (default 1,
+                                             but 0 in the backward kernels wherever the
+                                             padding would cost a resident work-group -
+                                             patch 09). One switch for all three kernels,
+                                             so setting it also moves the forward kernel,
+                                             which wants 1.
 DLPRIM_CONV_FP16               0 | 1         fp16 tiles + packed-fp16 multiply, fp32 tensors
                                              in/out (default 0). Raises the split-K defaults
-                                             to 16 / 64 to keep fp16 sums short. Read at kernel
-                                             compile time, so set it before the first convolution.
+                                             to 16 / 64 to keep fp16 sums short. Read at
+                                             kernel compile time, so set it before the first
+                                             convolution.
 ```
 
 Setting both `*_PLANES` to `0` brings back the original emulated-atomic
