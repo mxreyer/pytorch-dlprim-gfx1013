@@ -10,8 +10,8 @@ Profiling ResNet-9 training on an AMD BC-250 (gfx1013, 40 CU, Mesa rusticl)
 found that 89% of a step is convolution and 77% is the three Winograd
 kernels. Five changes to them take the step from 972 img/s (after the
 split-K fix filed separately) to 2,055, with gradients matching CPU references
-over 900 sweeps of the six layer shapes. They are a stacked series of six
-patches, one per item below, in `patches/dlprimitives/04`–`08` and `10` at
+over 900 sweeps of the six layer shapes. They are a stacked series of five
+patches, one per item below, in `patches/dlprimitives/04`–`08` at
 https://github.com/mxreyer/pytorch-dlprim-gfx1013 (`git format-patch` output
 with the commit messages). The per-section numbers below are from the
 investigation, in the order the changes were found; re-measured patch by
@@ -83,13 +83,13 @@ latency overlaps with work instead of stalling on it. Step 65.0 → 59.8 ms.
 LDS double-buffering was measured too and lost to the occupancy it costs;
 documented, not included.
 
-## 4. Optional fp16 inner loop (2,055 → 2,987 img/s) — `10-winograd-fp16`
+## Related, filed separately
 
-Behind `DLPRIM_CONV_FP16=1`: tiles converted to half on the way into LDS, the
-GEMM done as `half2` fma with half accumulators, tensors in memory still fp32.
-Y/dX/dW land within ~0.5% of the fp32 result — about 10× looser than TF32, so
-opt-in. Included in case you want it as an option; no argument for it being
-the default.
+Two further changes sit on top of this series and are their own reports,
+because each asks a different question: `winograd-lds-padding` (the transpose
+padding costs a resident work-group in the backward kernels) and
+`winograd-fp16-inner-loop` (an opt-in fp16 GEMM, +45% with an accuracy
+trade-off to decide on). Both depend on the patches above and say so.
 
 ## Environment
 

@@ -39,7 +39,7 @@ ResNet-9 layer shape.
 | [OPENCL-PERF.md](OPENCL-PERF.md) | Claude's full investigation: every measurement, dead end and fix. Long by design; the reference for anyone continuing this work. |
 | [HANDOFF.md](HANDOFF.md) | Where things stand, what is still open, the constraints to keep in mind. (For a future Claude session.) |
 | `tools/` | Microbenchmarks (`ocl-micro.c`, `libclc-probe.c`, `fp16-micro.c`), correctness sweeps (`wino-repro.py`, `bn-check.py`, ...), a Mesa-from-source container (`mesa-dev/`). |
-| `upstream/` | Reports ready to file: five bugs and one proposal for `dlprimitives`, one for `pytorch_dlprim`. |
+| `upstream/` | Reports ready to file: five bugs and two proposals for `dlprimitives`, one for `pytorch_dlprim`. |
 | `patches/` | Everything `build.sh` applies, per target; the `dlprimitives` series is one patch per report. |
 
 ## The patches
@@ -64,7 +64,7 @@ at batch 128 with the series applied up to that patch.
 | `07-bn-sums-grid-stride` | Spreads the BatchNorm sum across memory instead of walking it in per-lane chunks that hit the same cache sets every step | winograd-performance §2 | 1,949 |
 | `08-winograd-prefetch` | Starts the next slice's loads before the current slice's arithmetic, so the wait for memory overlaps with work | winograd-performance §3 | 2,068 |
 | `09-winograd-tr-offset` | Drops the scratch-tile padding in the backward kernels, where the 8 KiB it costs was worth a second resident work-group per CU; forward keeps it | winograd-lds-padding | 2,261 |
-| `10-winograd-fp16` | Opt-in: half-precision tiles and multiply-accumulate inside the kernel, fp32 tensors in memory | winograd-performance §4 | 2,354; 2,918 with `DLPRIM_CONV_FP16=1` |
+| `10-winograd-fp16` | Opt-in: half-precision tiles and multiply-accumulate inside the kernel, fp32 tensors in memory | winograd-fp16-inner-loop | 2,354; 2,918 with `DLPRIM_CONV_FP16=1` |
 | `11-local-knobs` | The environment variables and the partials-hash diagnostic used for the measurements; inert unless set | — | — |
 
 **`patches/pytorch_dlprim/`** — the extension itself.
