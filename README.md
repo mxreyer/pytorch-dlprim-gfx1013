@@ -147,15 +147,7 @@ applies them:
 
 Each step was found by profiling and confirmed by first timing a
 wrong-but-cheap variant; the measurements are in OPENCL-PERF.md, Findings 2,
-3, 10, 11, 12 and 13. The tables here are the synthetic GPU-only step; the
-16-epoch benchmark quoted at the top (real data, images prepared on the CPU)
-is a different measurement and does not track it exactly.
-
-These kernels are dense enough to expose an undervolted clock governor: with
-the GPU's idle floor at 1000 MHz / 718 mV they produced wrong gradients in 66
-of 100 sweeps, with the governor's default 800 mV in 0 of 900. If a rare wrong
-gradient ever shows up, pin the clock and run `tools/wino-repro.py` before
-suspecting the code (HANDOFF.md has the procedure).
+3, 10, 11, 12 and 13.
 
 ### Environment variables
 
