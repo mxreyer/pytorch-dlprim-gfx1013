@@ -336,7 +336,7 @@ index b7746ba..ad7a122 100644
 +// A pixel is covered by two tiles along each axis (rows 2t-1..2t+2 overlap
 +// by two), and those two tiles have opposite parity - except on the first
 +// row/column, which only tile 0 (even) reaches, and on the last one when the
-+// size is even, which only the last tile (odd) reaches. Elements of a plane
++// size is even, which only the last tile, n/2-1, reaches. Elements of a plane
 +// that no tile of its parity class writes are never initialised, so mask them
 +// here instead of zero-filling 4 planes before every launch.
 +inline int parity_mask(int r,int n)
