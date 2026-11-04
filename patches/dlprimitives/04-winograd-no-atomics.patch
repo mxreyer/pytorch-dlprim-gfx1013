@@ -28,6 +28,10 @@ The reduce costs under 2% of the kernel it replaces. Selected when the
 device is not NVIDIA and does not advertise cl_ext_float_atomics; the
 atomic paths are kept and used otherwise. ResNet-9 training on gfx1013:
 972 -> 1,374 img/s, gradients matching CPU references.
+
+The figures above are from the original investigation run. Re-measured
+patch by patch on the stacked series, this step is 984 -> 1,477 img/s;
+the README at https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
 ---
  src/core/conv.cpp                  | 143 ++++++++++++++++++++++++++---
  src/kernels/winograd_bwd_data.cl   |  67 ++++++++++++++

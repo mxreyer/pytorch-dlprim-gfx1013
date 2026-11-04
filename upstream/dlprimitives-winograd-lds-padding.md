@@ -58,6 +58,10 @@ direction, that is 60.6 → 53.8 ms of GPU time per training step, and
 there is no backward kernel in an inference pass), test accuracy 0.924 either
 way, 90% reached at epoch 13 either way.
 
+The step figures above are from the original investigation run. Re-measured
+patch by patch on the stacked series, the same step is 2,068 → 2,261 img/s;
+the README at https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
+
 ## Suggested fix
 
 Drop the transpose padding in the two backward constructors when it costs

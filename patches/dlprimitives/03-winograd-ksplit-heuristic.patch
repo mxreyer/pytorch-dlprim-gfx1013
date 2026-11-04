@@ -24,6 +24,10 @@ ff2d590 described the previous rule as a workaround for a small HD530 not
 to use K reduction; if that was about the atomic accumulation rather than
 occupancy, the following change removes the atomics, otherwise the target
 may want to be vendor-specific.
+
+The figures above are from the original investigation run. Re-measured
+patch by patch on the stacked series, this step is 915 -> 984 img/s;
+the README at https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
 ---
  src/core/conv.cpp | 24 +++++++++++++++++++++---
  1 file changed, 21 insertions(+), 3 deletions(-)

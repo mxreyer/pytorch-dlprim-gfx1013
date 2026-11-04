@@ -125,6 +125,11 @@ Accuracy is the table above — note that the fp32 correctness sweeps the other
 reports cite (`tools/wino-repro.py`, 2e-4 relative) do not apply in this mode
 and are not the right test for it; `tools/grad-err.py` is.
 
+The throughput figures here are from the original investigation run.
+Re-measured patch by patch on the stacked series, the full series is 2,261
+img/s in fp32 and 2,918 with the fp16 inner loop; the README at
+https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
+
 ## Disclosure
 
 This report, and the patch, tools and measurements it cites, were produced
