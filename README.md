@@ -22,8 +22,9 @@ The patches from this repo close that gap - The before/after, measured by `tools
 | **with these patches** | **2,261** |
 | + opt-in fp16 inner loop (`DLPRIM_CONV_FP16=1`) | 2,918 |
 
-Gradients match CPU references on every
-ResNet-9 layer shape. The benchmark numbers per-patch, for every step in between, is given in the table below.
+In fp32, gradients match CPU references on every ResNet-9 layer shape. The
+per-patch benchmark numbers, for every step in between, are given in the table
+below.
 
 Each [release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
 of this repository has a prebuilt `pt_ocl.so` attached: the native library of
