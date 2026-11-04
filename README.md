@@ -68,7 +68,7 @@ that patch.
 | `07-bn-sums-grid-stride` | **Access patterns.** The BatchNorm sum walks memory with a stride instead of per-lane chunks that hit the same cache sets (13 of 359 GB/s). | winograd-performance §2 | 1,949 |
 | `08-winograd-prefetch` | **Prefetch.** Kernels used to load a slice, wait, then multiply. They now issue the next slice's loads *before* the current multiply, overlapping memory waits with arithmetic. | winograd-performance §3 | 2,068 |
 | `09-winograd-tr-offset` | **Scratch padding.** Tiles in LDS (shared on-chip memory) are padded to avoid bank conflicts, but any padding also allocates 16 extra tile rows: 40 KiB per work-group instead of 32, just too much for two work-groups per CU, halving parallelism (`tools/ocl-micro.c occ` measures the boundary). Dropping it pays off in the two backward kernels; forward keeps it. | winograd-lds-padding | 2,261 |
-| `10-winograd-fp16` | **fp16 inner loop, opt-in.** Tiles are converted to half on entry to shared memory and multiplied two at a time; tensors in memory stay fp32. Y/dX/dW land within ~0.5% of fp32, about 10× looser than NVIDIA's TF32 default, hence opt-in. | winograd-fp16-inner-loop | 2,354; 2,918 with `DLPRIM_CONV_FP16=1` |
+| `10-winograd-fp16` | **fp16 inner loop, opt-in.** Tiles are converted to half on entry to shared memory and multiplied two at a time; tensors in memory stay fp32. Y/dX/dW land within ~0.5% of fp32, about 10× looser than NVIDIA's TF32 default, hence opt-in. | winograd-fp16-inner-loop | 2,918 |
 | `11-local-knobs` | The environment variables and the partials-hash diagnostic used for the measurements; inert unless set. | — | — |
 
 `patches/pytorch_dlprim/` — the extension itself.
