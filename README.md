@@ -13,7 +13,7 @@ BC-250's gfx1013 GPU under Mesa's rusticl driver. Also contributes and opt-in fp
 inner loop for further speed-up.
 
 The target performance for this investigation was that of a cloud T4, which the BC-250 matches on paper when operated at 40 CUs / 2.0 GHz.
-Benchmarking the ResNet-9 training step at batch 128, however, the T4 managed 2,294 img/s while the BC250 only trained at 915 img/s.
+Benchmarking the ResNet-9 training step at batch 128, however, the T4 managed 2,294 img/s at fp32 while the BC250 only trained at 915 img/s.
 The patches from this repo close that gap - The before/after, measured by `tools/profile-step.py`:
 
 | | training img/s |
