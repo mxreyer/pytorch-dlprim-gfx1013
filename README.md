@@ -13,8 +13,13 @@ BC-250's gfx1013 GPU under Mesa's rusticl driver. Also contributes and opt-in fp
 inner loop for further speed-up.
 
 The target performance for this investigation was that of a cloud T4, which the BC-250 matches on paper when operated at 40 CUs / 2.0 GHz.
-Benchmarking the ResNet-9 training step at batch 128, however, the T4 managed 2,294 img/s at fp32 while the BC250 only trained at 915 img/s.
-The patches from this repo close that gap - The before/after, measured by
+In a full 16-epoch ResNet-9 / CIFAR-10 training run at batch 128 (real data,
+augmentation on the CPU, median img/s per epoch), however, a T4 on Google
+Colab trained at 2,294 img/s in fp32 while the stock BC-250 managed only 919.
+With these patches the same run reaches 2,337 img/s on the BC-250, just past
+the T4, and 2,992 with the opt-in fp16 inner loop.
+
+The before/after below isolates the GPU step instead. It is measured by
 `tools/profile-step.py`, which times the ResNet-9 training step on random
 CIFAR-10-shaped input (3×32×32 images, 10 classes), so data loading and
 augmentation are not included:
@@ -27,8 +32,8 @@ augmentation are not included:
 
 In fp32, gradients match CPU references on every ResNet-9 layer shape. Over a
 16-epoch ResNet-9 / CIFAR-10 training run, test accuracy is 0.924 in fp32 and
-0.926 with the fp16 inner loop, inside the run-to-run spread. The per-patch benchmark numbers, for every step in
-between, are given in the table below.
+0.926 with the fp16 inner loop, inside the run-to-run spread. The per-patch
+benchmark numbers, for every step in between, are given in the table below.
 
 Each [release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
 of this repository has a prebuilt `pt_ocl.so` attached: the native library of
@@ -214,9 +219,9 @@ as `pt_ocl.so`; anyone can check one by rebuilding and comparing `sha256sum`.
 
 AsRock BC-250 (gfx1013, 40 CU, 2.0 GHz, 16 GB unified), Linux 7.1, Mesa
 26.1.8 (Fedora 44) on the host and Mesa 26.2.2 (Fedora 45) in containers, LLVM
-22.1.8, `RUSTICL_ENABLE=radeonsi`. Throughput is the synthetic training step from
-`tools/profile-step.py`; accuracy is from 16-epoch ResNet-9 / CIFAR-10 runs at
-batch 128. On Mesa 26.1 the system libclc also cannot
+22.1.8, `RUSTICL_ENABLE=radeonsi`. Throughput in the tables is the synthetic training step from
+`tools/profile-step.py`; the T4 comparison and the accuracy figures are from
+16-epoch ResNet-9 / CIFAR-10 runs at batch 128. On Mesa 26.1 the system libclc also cannot
 link `sin()`/`cos()` (so `torch.randn` on the device fails); Mesa's own libclc
 fork fixes that; `tools/mesa-dev/` builds an image with it.
 
