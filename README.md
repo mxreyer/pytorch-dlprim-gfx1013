@@ -96,6 +96,18 @@ reduction and overwriting slot 0 first. Softmax reduces twice back to back
 (max, then sum), and its unit tests fail. `01-reduce-barrier` adds the missing
 barrier.
 
+`02-activation-dtype` fixes a bug that has nothing to do with rusticl and
+shows up on any device. The activation kernel is written in terms of a
+`dtype` define, which defaults to `float`, but `dlprimitives` builds it with
+only the activation type and never passes the tensor's dtype in. On a half
+tensor the kernel therefore reads and writes the 2-byte values as 4-byte
+floats, and `relu`, `tanh`, `sigmoid` and `relu6` return garbage without any
+error. The patch builds the kernel for the tensor's own dtype, checks that
+input and output dtypes match, and takes the backward kernel's `beta` scale
+as a float (which is what the host always passes) and casts it inside the
+kernel. With it, all four activations on half match the CPU forward and
+backward to fp16 precision.
+
 ### What the convolution patches do
 
 Convolution is 89% of a ResNet-9 training step, and four fifths of that is
