@@ -22,7 +22,7 @@ The patches from this repo close that gap - The before/after, measured by `tools
 | **with these patches** | **2,261** |
 | + opt-in fp16 inner loop (`DLPRIM_CONV_FP16=1`) | 2,918 |
 
-Accuracy is unchanged throughout. Gradients match CPU references on every
+Gradients match CPU references on every
 ResNet-9 layer shape. The benchmark numbers per-patch, for every step in between, is given in the table below.
 
 Each [release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
@@ -51,7 +51,7 @@ a new build: run `./build.sh`, then tag a release with `pt_ocl.so` attached.
 rusticl build fix, `01` a correctness fix it exposes and `02` a second
 correctness fix; `03`–`10` are performance changes, stacked in the order
 they were measured; `11` is local only. The performance work all goes into
-convolution: it is 89% of a ResNet-9 training step, and four fifths of that
+convolution: it is 89% of a ResNet-9 training step, and over two thirds of that
 is the backward pass. The last column provides benchmark numbers, in img/s,
 for the ResNet-9 training step at batch 128 with the series applied up to
 that patch.
