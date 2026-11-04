@@ -32,7 +32,10 @@ augmentation are not included:
 
 In fp32, gradients match CPU references on every ResNet-9 layer shape. Over a
 16-epoch ResNet-9 / CIFAR-10 training run, test accuracy is 0.924 in fp32 and
-0.926 with the fp16 inner loop, inside the run-to-run spread. The per-patch
+0.926 with the fp16 inner loop, inside the run-to-run spread. The same run lands
+at 0.922–0.927 on every platform in the T4 comparison, stock BC-250 and the
+T4 included, so training with the patches ends where stock `pytorch_ocl` and
+CUDA do. The per-patch
 benchmark numbers, for every step in between, are given in the table below.
 
 Each [release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
