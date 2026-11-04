@@ -178,6 +178,62 @@ the atomic kernels stall in their compare-and-swap loop rather than on
 occupancy. Without the scratch padding patch `09` gives up, we fall to
 792 img/s.
 
+## Using a release build
+
+`pt_ocl.so` replaces the native library inside the stock `pytorch_ocl` 0.2.0
+wheel, so you install the wheel first, then put the patched file over it. You
+need Python 3.12 on x86-64 Linux, with Mesa's rusticl driver and an OpenCL ICD
+loader installed.
+
+1. Create a venv with `torch==2.4.0` (CPU build) and the stock wheel:
+
+   ```
+   python3.12 -m venv ~/ocl-venv
+   ~/ocl-venv/bin/pip install "torch==2.4.0" --index-url https://download.pytorch.org/whl/cpu
+   ~/ocl-venv/bin/pip install \
+     "https://github.com/artyom-beilis/pytorch_dlprim/releases/download/0.2.0/pytorch_ocl-0.2.0+torch2.4-cp312-none-linux_x86_64.whl"
+   ```
+
+2. Download `pt_ocl.so` from the
+   [latest release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases/latest)
+   and check that its `sha256sum` matches the digest on the release page:
+
+   ```
+   curl -LO https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases/latest/download/pt_ocl.so
+   sha256sum pt_ocl.so
+   ```
+
+3. Install it over the stock library and clear the kernel cache, whose
+   compiled kernels were built from the old source:
+
+   ```
+   install -m0644 pt_ocl.so ~/ocl-venv/lib/python3.12/site-packages/pytorch_ocl/pt_ocl.so
+   rm -f ~/.dlprimitives/cache.db
+   ```
+
+4. Run with `RUSTICL_ENABLE=radeonsi` set. Import `pytorch_ocl` to register the
+   device, then move tensors and models to `ocl:0`:
+
+   ```python
+   import torch, pytorch_ocl
+
+   dev = torch.device("ocl:0")
+   model = torch.nn.Linear(64, 10).to(dev)
+   x = torch.randn(32, 64).to(dev)
+   print(model(x).sum().item())
+   ```
+
+   ```
+   RUSTICL_ENABLE=radeonsi ~/ocl-venv/bin/python example.py
+   ```
+
+Convolutions accept float32 tensors only (see `01-half-fixes`). The first run
+of each layer shape is slow because the kernels compile on first use; later
+runs read them from `~/.dlprimitives/cache.db`. For the optional fp16 inner
+loop, set `DLPRIM_CONV_FP16=1` before the first convolution runs.
+
+To go back to stock, see [Reverting](#reverting).
+
 ## Building
 
 ```
@@ -204,8 +260,10 @@ as `pt_ocl.so`; anyone can check one by rebuilding and comparing `sha256sum`.
 
 ### Using the result
 
-Drop `pt_ocl.so` over the one in any venv that has the `pytorch_ocl` 0.2.0
-wheel and `torch==2.4.0`, then clear the kernel cache:
+Same as [using a release build](#using-a-release-build), with your own
+`./pt_ocl.so` in place of the downloaded one. Drop `pt_ocl.so` over the one
+in any venv that has the `pytorch_ocl` 0.2.0 wheel and `torch==2.4.0`, then
+clear the kernel cache:
 
 ```
 install -m0644 pt_ocl.so <venv>/lib/python3.12/site-packages/pytorch_ocl/pt_ocl.so
