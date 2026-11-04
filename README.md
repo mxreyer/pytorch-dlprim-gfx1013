@@ -24,13 +24,9 @@ between):
 Accuracy is unchanged throughout. Gradients match CPU references on every
 ResNet-9 layer shape.
 
-The `pt_ocl.so` attached to each
-[release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases) of this
-repository is what the notebook image in
-[bc250-jupyterhub-opencl-k3s](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s)
-installs, pinned by URL and sha256 in its Dockerfile. To ship a new build: run
-`./build.sh`, tag a release with `pt_ocl.so` attached, then bump the version
-and sha256 there.
+Each [release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
+of this repository has the built `pt_ocl.so` attached. To ship a new build: run
+`./build.sh`, then tag a release with `pt_ocl.so` attached.
 
 ## Overview
 
