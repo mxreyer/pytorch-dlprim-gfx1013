@@ -9,7 +9,8 @@
 Patches and a build script that make
 [pytorch_dlprim](https://github.com/artyom-beilis/pytorch_dlprim) (`pytorch_ocl`,
 the OpenCL backend for PyTorch) work correctly and run fast on the AsRock
-BC-250's gfx1013 GPU under Mesa's rusticl driver.
+BC-250's gfx1013 GPU under Mesa's rusticl driver. Also contributes and opt-in fp16
+inner loop for further speed-up.
 
 The before/after for ResNet-9 training step on the GPU at batch 128 in images per second
 (measured `tools/profile-step.py`; the per-patch table below has every step in
