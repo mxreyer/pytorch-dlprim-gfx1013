@@ -78,35 +78,36 @@ series applied up to that patch.
 
 ### What the build and correctness fixes do
 
-Softmax, cross-entropy, bias gradients and BatchNorm all need to add up one
-value across all 256 work-items of a group. `dlprimitives` does that with
-`work_group_reduce_add()`, a built-in that OpenCL 2.0 required and OpenCL 3.0
-made optional. rusticl does not provide it — the feature is missing from
-`CL_DEVICE_OPENCL_C_FEATURES` and no libclc build contains it — so those
-kernels fail to compile with "use of undeclared identifier".
+The first three patches make the library build on rusticl and give correct
+results. In the order the series applies them:
 
-`dlprimitives` already carries a portable fallback that computes the same sum
-through shared memory and a barrier, behind `CUSTOM_REDUCE`; `00-custom-reduce`
-turns it on. `tools/libclc-probe.c` checks the feature directly.
-
-That fallback has a race of its own, which nothing with the built-in would
-ever see: after the last barrier every work-item reads the result from slot 0
-of the shared array, and nothing stops work-item 0 from starting the *next*
-reduction and overwriting slot 0 first. Softmax reduces twice back to back
-(max, then sum), and its unit tests fail. `01-reduce-barrier` adds the missing
-barrier.
-
-`02-activation-dtype` fixes a bug that has nothing to do with rusticl and
-shows up on any device. The activation kernel is written in terms of a
-`dtype` define, which defaults to `float`, but `dlprimitives` builds it with
-only the activation type and never passes the tensor's dtype in. On a half
-tensor the kernel therefore reads and writes the 2-byte values as 4-byte
-floats, and `relu`, `tanh`, `sigmoid` and `relu6` return garbage without any
-error. The patch builds the kernel for the tensor's own dtype, checks that
-input and output dtypes match, and takes the backward kernel's `beta` scale
-as a float (which is what the host always passes) and casts it inside the
-kernel. With it, all four activations on half match the CPU forward and
-backward to fp16 precision.
+- **Portable reduction** (`00`). Softmax, cross-entropy, bias gradients and
+  BatchNorm all need to add up one value across all 256 work-items of a
+  group. `dlprimitives` does that with `work_group_reduce_add()`, a built-in
+  that OpenCL 2.0 required and OpenCL 3.0 made optional. rusticl does not
+  provide it — the feature is missing from `CL_DEVICE_OPENCL_C_FEATURES` and
+  no libclc build contains it — so those kernels fail to compile with "use of
+  undeclared identifier". `dlprimitives` already carries a portable fallback
+  that computes the same sum through shared memory and a barrier, behind
+  `CUSTOM_REDUCE`; the patch turns it on. `tools/libclc-probe.c` checks the
+  feature directly.
+- **Reduction barrier** (`01`). That fallback has a race of its own, which
+  nothing with the built-in would ever see: after the last barrier every
+  work-item reads the result from slot 0 of the shared array, and nothing
+  stops work-item 0 from starting the *next* reduction and overwriting slot 0
+  first. Softmax reduces twice back to back (max, then sum), and its unit
+  tests fail. The patch adds the missing barrier.
+- **Activation dtype** (`02`). A bug that has nothing to do with rusticl and
+  shows up on any device. The activation kernel is written in terms of a
+  `dtype` define, which defaults to `float`, but `dlprimitives` builds it with
+  only the activation type and never passes the tensor's dtype in. On a half
+  tensor the kernel therefore reads and writes the 2-byte values as 4-byte
+  floats, and `relu`, `tanh`, `sigmoid` and `relu6` return garbage without
+  any error. The patch builds the kernel for the tensor's own dtype, checks
+  that input and output dtypes match, and takes the backward kernel's `beta`
+  scale as a float (which is what the host always passes) and casts it inside
+  the kernel. With it, all four activations on half match the CPU forward and
+  backward to fp16 precision.
 
 ### What the convolution patches do
 
