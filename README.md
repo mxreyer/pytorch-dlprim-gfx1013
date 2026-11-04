@@ -171,7 +171,7 @@ of each layer shape is slow because the kernels compile on first use; later
 runs read them from `~/.dlprimitives/cache.db`. For the optional fp16 inner
 loop, set `DLPRIM_CONV_FP16=1` before the first convolution runs.
 
-### Reverting
+## Reverting
 
 Reinstall the stock wheel and clear the cache:
 
