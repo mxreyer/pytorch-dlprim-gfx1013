@@ -76,7 +76,7 @@ series applied up to that patch.
 | `01-half-fixes` | Makes convolution reject anything but float32 instead of silently returning NaN; fixes hardtanh/relu6/clamp for half tensors; makes the gradient contiguous in `hardtanh_backward`. Report: pytorch_dlprim-half-tensor-fixes. |
 | `02-gelu-mad` | `fma()` → `mad()` in GELU backward. On Mesa < 26.2 rusticl's `fma()` is a 563-instruction software emulation (3.8× on GELU backward). Redundant but harmless on 26.2+. |
 
-### Why the reduction fails to compile
+### What the build and correctness fixes do
 
 Softmax, cross-entropy, bias gradients and BatchNorm all need to add up one
 value across all 256 work-items of a group. `dlprimitives` does that with
