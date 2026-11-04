@@ -32,6 +32,7 @@ between):
 Accuracy is unchanged throughout. Gradients match CPU references on every
 ResNet-9 layer shape.
 
+## Overview
 
 | file | description |
 | --- | --- |
