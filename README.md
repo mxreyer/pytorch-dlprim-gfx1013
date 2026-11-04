@@ -12,9 +12,9 @@ the OpenCL backend for PyTorch) work correctly and run fast on the AsRock
 BC-250's gfx1013 GPU under Mesa's rusticl driver. Also contributes and opt-in fp16
 inner loop for further speed-up.
 
-The before/after for ResNet-9 training step on the GPU at batch 128 in images per second
-(measured `tools/profile-step.py`; the per-patch table below has every step in
-between):
+The target performance for this investigation was that of a cloud T4, which the BC-250 matches on paper when operated at 40 CUs / 2.0 GHz.
+Benchmarking the ResNet-9 training step at batch 128, however, the T4 managed 2,294 img/s while the BC250 only trained at 915 img/s.
+The patches from this repo close that gap - The before/after, measured by `tools/profile-step.py`:
 
 | | training |
 | --- | ---: |
@@ -23,7 +23,7 @@ between):
 | + opt-in fp16 inner loop (`DLPRIM_CONV_FP16=1`) | 2,918 |
 
 Accuracy is unchanged throughout. Gradients match CPU references on every
-ResNet-9 layer shape.
+ResNet-9 layer shape. The benchmark numbers per-patch, for every step in between, is given in the table below.
 
 Each [release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
 of this repository has a prebuilt `pt_ocl.so` attached: the native library of
