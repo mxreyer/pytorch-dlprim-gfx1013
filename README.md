@@ -25,8 +25,14 @@ Accuracy is unchanged throughout. Gradients match CPU references on every
 ResNet-9 layer shape.
 
 Each [release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
-of this repository has the built `pt_ocl.so` attached. To ship a new build: run
-`./build.sh`, then tag a release with `pt_ocl.so` attached.
+of this repository has a prebuilt `pt_ocl.so` attached: the native library of
+`pytorch_ocl`, compiled by `build.sh` with all the patches below applied. It
+is a drop-in replacement for the `pt_ocl.so` inside the stock `pytorch_ocl`
+0.2.0 wheel (for `torch==2.4.0`, Python 3.12, x86-64 Linux), so you can get
+the fixes and the speed-up without building anything yourself; see
+[Using a release build](#using-a-release-build). The build is reproducible,
+so a release can be checked by rebuilding it and comparing `sha256sum`. To ship
+a new build: run `./build.sh`, then tag a release with `pt_ocl.so` attached.
 
 ## Overview
 
