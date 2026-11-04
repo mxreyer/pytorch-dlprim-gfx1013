@@ -16,7 +16,7 @@ The target performance for this investigation was that of a cloud T4, which the 
 Benchmarking the ResNet-9 training step at batch 128, however, the T4 managed 2,294 img/s while the BC250 only trained at 915 img/s.
 The patches from this repo close that gap - The before/after, measured by `tools/profile-step.py`:
 
-| | training |
+| | training img/s |
 | --- | ---: |
 | stock `pytorch_ocl` | 915 |
 | **with these patches** | **2,354** |
