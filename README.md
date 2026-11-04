@@ -253,7 +253,15 @@ of each layer shape is slow because the kernels compile on first use; later
 runs read them from `~/.dlprimitives/cache.db`. For the optional fp16 inner
 loop, set `DLPRIM_CONV_FP16=1` before the first convolution runs.
 
-To go back to stock, see [Reverting](#reverting).
+### Reverting
+
+Reinstall the stock wheel and clear the cache:
+
+```
+scratch/venv/bin/pip install --force-reinstall --no-deps \
+  "https://github.com/artyom-beilis/pytorch_dlprim/releases/download/0.2.0/pytorch_ocl-0.2.0+torch2.4-cp312-none-linux_x86_64.whl"
+rm -f ~/.dlprimitives/cache.db
+```
 
 ## Building
 
@@ -278,38 +286,6 @@ and no RPATH is embedded, so two runs at the pinned commits give byte-identical
 output. Shipped builds are attached to
 [GitHub releases](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
 as `pt_ocl.so`; anyone can check one by rebuilding and comparing `sha256sum`.
-
-### Using the result
-
-Same as [using a release build](#using-a-release-build), with your own
-`./pt_ocl.so` in place of the downloaded one. Drop `pt_ocl.so` over the one
-in any venv that has the `pytorch_ocl` 0.2.0 wheel and `torch==2.4.0`, then
-clear the kernel cache:
-
-```
-install -m0644 pt_ocl.so <venv>/lib/python3.12/site-packages/pytorch_ocl/pt_ocl.so
-rm -f ~/.dlprimitives/cache.db     # cached binaries are keyed to the old kernel source
-```
-
-Do not `cp` over a `pt_ocl.so` that a running process has loaded: `cp`
-rewrites the file in place and the process segfaults. Use `install` (it
-unlinks first) or stop the process.
-
-Run with `RUSTICL_ENABLE=radeonsi` in the environment. A quick check:
-
-```
-RUSTICL_ENABLE=radeonsi scratch/venv/bin/python tools/wino-repro.py 10   # expect 0 bad
-```
-
-### Reverting
-
-Reinstall the stock wheel and clear the cache:
-
-```
-scratch/venv/bin/pip install --force-reinstall --no-deps \
-  "https://github.com/artyom-beilis/pytorch_dlprim/releases/download/0.2.0/pytorch_ocl-0.2.0+torch2.4-cp312-none-linux_x86_64.whl"
-rm -f ~/.dlprimitives/cache.db
-```
 
 ## Environment these numbers come from
 
