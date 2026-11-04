@@ -40,11 +40,12 @@ of this repository has the built `pt_ocl.so` attached. To ship a new build: run
 
 `patches/<target>/NN-*.patch`, applied in numeric order by `build.sh`.
 
-`patches/dlprimitives/` — the `dlprimitives` submodule. `00` is the
-rusticl build fix, `01` the correctness fix it exposes and `02` a second
-correctness fix; `03`–`10` are the performance changes, stacked in the order
-they were measured; `11` is local only. img/s is the ResNet-9 training step
-at batch 128 with the series applied up to that patch.
+`patches/dlprimitives/` — the `dlprimitives` submodule. `00` is a
+rusticl build fix, `01` a correctness fix it exposes and `02` a second
+correctness fix; `03`–`10` are performance changes, stacked in the order
+they were measured; `11` is local only. The last column provides benchmark
+numbers, in img/s, for the ResNet-9 training step at batch 128 with the
+series applied up to that patch.
 
 | patch | what | report in `upstream/` | img/s after |
 | --- | --- | --- | ---: |
@@ -61,7 +62,7 @@ at batch 128 with the series applied up to that patch.
 | `10-winograd-fp16` | Opt-in: half-precision tiles and multiply-accumulate inside the kernel, fp32 tensors in memory | winograd-fp16-inner-loop | 2,354; 2,918 with `DLPRIM_CONV_FP16=1` |
 | `11-local-knobs` | The environment variables and the partials-hash diagnostic used for the measurements; inert unless set | — | — |
 
-**`patches/pytorch_dlprim/`** — the extension itself.
+`patches/pytorch_dlprim/` — the extension itself.
 
 | patch | what |
 | --- | --- |
