@@ -1,4 +1,4 @@
-# Patches for dlprimitives and pytorch_dlprim under rusticl on AMD BC-250 (gfx1013)
+# Patches for dlprimitives/pytorch_dlprim under rusticl on AMD BC-250
 
 > **Note:** the patches, tools and documentation in this repository were
 > heavily authored by Claude ([Claude Code](https://claude.com/claude-code),
