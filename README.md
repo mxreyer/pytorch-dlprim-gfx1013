@@ -19,7 +19,7 @@ The patches from this repo close that gap - The before/after, measured by `tools
 | | training img/s |
 | --- | ---: |
 | stock `pytorch_ocl` | 915 |
-| **with these patches** | **2,354** |
+| **with these patches** | **2,261** |
 | + opt-in fp16 inner loop (`DLPRIM_CONV_FP16=1`) | 2,918 |
 
 Accuracy is unchanged throughout. Gradients match CPU references on every
@@ -111,7 +111,7 @@ DLPRIM_CONV_FP16               0 | 1         fp16 tiles + packed-fp16 multiply, 
 
 Setting both `*_PLANES` to `0` puts the emulated-atomic backward kernels
 back, with the rest of the series still on. This brings us down to 1,129
-img/s in `tools/profile-step.py` against 2,330 img/s for the full
+img/s in `tools/profile-step.py` against 2,261 img/s for the full
 series. Note that the first number needs `DLPRIM_WINOGRAD_TR_OFFSET=1`;
 the atomic kernels stall in their compare-and-swap loop rather than on
 occupancy. Without the scratch padding patch `09` gives up, we fall to
