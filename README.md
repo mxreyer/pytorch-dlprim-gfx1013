@@ -40,7 +40,7 @@ of this repository has the built `pt_ocl.so` attached. To ship a new build: run
 
 `patches/<target>/NN-*.patch`, applied in numeric order by `build.sh`.
 
-**`patches/dlprimitives/`** — the `dlprimitives` submodule. `00` is the
+`patches/dlprimitives/` — the `dlprimitives` submodule. `00` is the
 rusticl build fix, `01` the correctness fix it exposes and `02` a second
 correctness fix; `03`–`10` are the performance changes, stacked in the order
 they were measured; `11` is local only. img/s is the ResNet-9 training step
