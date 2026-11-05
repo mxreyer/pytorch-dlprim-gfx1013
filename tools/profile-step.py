@@ -19,8 +19,7 @@ import sys, collections, csv, torch, pytorch_ocl  # noqa
 from torch import nn
 
 
-# ResNet-9 exactly as in the benchmark the img/s numbers come from:
-# https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s/blob/main/benchmark.py
+# ResNet-9, the model the img/s numbers in README.md are measured on.
 def conv_bn(ci, co, pool=False):
     layers = [nn.Conv2d(ci, co, 3, padding=1, bias=False), nn.BatchNorm2d(co), nn.ReLU()]
     if pool:

@@ -35,6 +35,10 @@ backward-filter kernels drop from 55.3 ms to 46.1 ms, the two 128→128 layers
 nearly halve, and end-to-end throughput goes 909 → 972 img/s (+6.9%) with
 gradients unchanged to 1e-5 relative.
 
+The figures above are from the original investigation run. Re-measured
+patch by patch on the stacked series, the same step is 915 → 984 img/s; the
+README at https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
+
 ## Suggested fix
 
 Compare work-groups to compute units, aim for a few work-groups per CU, and

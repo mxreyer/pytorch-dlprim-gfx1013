@@ -18,6 +18,10 @@ TF32-class accuracy but slower than plain fp32 on this chip.
 The LDS-residency rule from the previous patch is told about the half-sized
 tiles: with LTYPE half a padded work-group is 20 KiB, two of them fit, and
 the padding stays. Measured either way in fp16 mode, 2,889-2,901 img/s.
+
+The figures above are from the original investigation run. Re-measured
+patch by patch on the stacked series, this step is 2,261 -> 2,918 img/s;
+the README at https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
 ---
  src/core/conv.cpp                  | 32 +++++++++++---
  src/kernels/winograd_bwd_data.cl   | 68 ++++++++++++++++++++++++++---

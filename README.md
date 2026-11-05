@@ -9,28 +9,44 @@
 Patches and a build script that make
 [pytorch_dlprim](https://github.com/artyom-beilis/pytorch_dlprim) (`pytorch_ocl`,
 the OpenCL backend for PyTorch) work correctly and run fast on the AsRock
-BC-250's gfx1013 GPU under Mesa's rusticl driver.
+BC-250's gfx1013 GPU under Mesa's rusticl driver. Also contributes and opt-in fp16
+inner loop for further speed-up.
 
-The before/after for ResNet-9 training step on the GPU at batch 128 in images per second
-(measured `tools/profile-step.py`; the per-patch table below has every step in
-between):
+The target performance for this investigation was that of a cloud T4, which the BC-250 matches on paper when operated at 40 CUs / 2.0 GHz.
+In a full 16-epoch ResNet-9 / CIFAR-10 training run at batch 128 (real data,
+augmentation on the CPU, median img/s per epoch), however, a T4 on Google
+Colab trained at 2,294 img/s in fp32 while the stock BC-250 managed only 919.
+With these patches the same run reaches 2,337 img/s on the BC-250, just past
+the T4, and 2,992 with the opt-in fp16 inner loop.
 
-| | training |
+The before/after below isolates the GPU step instead. It is measured by
+`tools/profile-step.py`, which times the ResNet-9 training step on random
+CIFAR-10-shaped input (3×32×32 images, 10 classes), so data loading and
+augmentation are not included:
+
+| | training img/s |
 | --- | ---: |
 | stock `pytorch_ocl` | 915 |
-| **with these patches** | **2,354** |
+| **with these patches** | **2,261** |
 | + opt-in fp16 inner loop (`DLPRIM_CONV_FP16=1`) | 2,918 |
 
-Accuracy is unchanged throughout. Gradients match CPU references on every
-ResNet-9 layer shape.
+In fp32, gradients match CPU references on every ResNet-9 layer shape. Over a
+16-epoch ResNet-9 / CIFAR-10 training run, test accuracy is 0.924 in fp32 and
+0.926 with the fp16 inner loop, inside the run-to-run spread. The same run lands
+at 0.922–0.927 on every platform in the T4 comparison, stock BC-250 and the
+T4 included, so training with the patches ends where stock `pytorch_ocl` and
+CUDA do. The per-patch
+benchmark numbers, for every step in between, are given in the table below.
 
-The `pt_ocl.so` attached to each
-[release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases) of this
-repository is what the notebook image in
-[bc250-jupyterhub-opencl-k3s](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s)
-installs, pinned by URL and sha256 in its Dockerfile. To ship a new build: run
-`./build.sh`, tag a release with `pt_ocl.so` attached, then bump the version
-and sha256 there.
+Each [release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
+of this repository has a prebuilt `pt_ocl.so` attached: the native library of
+`pytorch_ocl`, compiled by `build.sh` with all the patches below applied. It
+is a drop-in replacement for the `pt_ocl.so` inside the stock `pytorch_ocl`
+0.2.0 wheel (for `torch==2.4.0`, Python 3.12, x86-64 Linux), so you can get
+the fixes and the speed-up without building anything yourself; see
+[Using a release build](#using-a-release-build). The build is reproducible,
+so a release can be checked by rebuilding it and comparing `sha256sum`. To ship
+a new build: run `./build.sh`, then tag a release with `pt_ocl.so` attached.
 
 ## Overview
 
@@ -44,104 +60,36 @@ and sha256 there.
 
 `patches/<target>/NN-*.patch`, applied in numeric order by `build.sh`.
 
-**`patches/dlprimitives/`** — the `dlprimitives` submodule. `00` is the
-rusticl build fix, `01` the correctness fix it exposes and `02` a second
-correctness fix; `03`–`10` are the performance changes, stacked in the order
-they were measured; `11` is local only. img/s is the ResNet-9 training step
-at batch 128 with the series applied up to that patch.
+`patches/dlprimitives/` — the `dlprimitives` submodule. `00` is a
+rusticl build fix, `01` a correctness fix it exposes and `02` a second
+correctness fix; `03`–`10` are performance changes, stacked in the order
+they were measured; `11` is local only. The performance work all goes into
+convolution: it is 89% of a ResNet-9 training step, and over two thirds of that
+is the backward pass. The last column provides benchmark numbers, in img/s,
+for the ResNet-9 training step at batch 128 with the series applied up to
+that patch.
 
 | patch | what | report in `upstream/` | img/s after |
 | --- | --- | --- | ---: |
-| `00-custom-reduce` | Adds values across a work-group the portable way, since rusticl lacks the OpenCL 2.0 built-in for it; without this, softmax, cross-entropy, bias gradients and BatchNorm sums do not compile at all | custom-reduce-autodetect | — |
-| `01-reduce-barrier` | Adds a barrier after the portable reduction hands out its result, so a kernel that reduces twice in a row (softmax: max, then sum) cannot have work-item 0 start the second one and overwrite the first result before slower work-items have read it; the `dlprimitives` softmax and log_softmax tests fail without it | reduce-barrier | — |
-| `02-activation-dtype` | Builds the activation kernel for the tensor's own type; relu/tanh/sigmoid/relu6 on a half tensor were reading it as float and returning garbage | activation-half-dtype | 915 (stock) |
-| `03-winograd-ksplit-heuristic` | Decides how far to split the backward-filter work by counting work-groups per compute unit; the old rule left 24 of 40 CUs idle on a 128→128 layer | winograd-ksplit-heuristic | 984 |
-| `04-winograd-no-atomics` | Gives each parallel slice its own scratch plane and sums the planes afterwards, instead of every slice fighting over the same memory through emulated float atomics | winograd-performance §1 | 1,477 |
-| `05-winograd-fwd-filter-layout` | Stores the transformed filters `[C][N]`, so neighbouring lanes read neighbouring addresses | winograd-performance §2 | 1,634 |
-| `06-winograd-bwd-filter-loads` | Points the 32 lanes at neighbouring tiles of one image plane rather than at 32 different planes; vector loads on the edge tiles | winograd-performance §2 | 1,815 |
-| `07-bn-sums-grid-stride` | Spreads the BatchNorm sum across memory instead of walking it in per-lane chunks that hit the same cache sets every step | winograd-performance §2 | 1,949 |
-| `08-winograd-prefetch` | Starts the next slice's loads before the current slice's arithmetic, so the wait for memory overlaps with work | winograd-performance §3 | 2,068 |
-| `09-winograd-tr-offset` | Drops the scratch-tile padding in the backward kernels, where the 8 KiB it costs was worth a second resident work-group per CU; forward keeps it | winograd-lds-padding | 2,261 |
-| `10-winograd-fp16` | Opt-in: half-precision tiles and multiply-accumulate inside the kernel, fp32 tensors in memory | winograd-fp16-inner-loop | 2,354; 2,918 with `DLPRIM_CONV_FP16=1` |
-| `11-local-knobs` | The environment variables and the partials-hash diagnostic used for the measurements; inert unless set | — | — |
+| `00-custom-reduce` | **Build fix.** Softmax, cross-entropy, bias gradients and BatchNorm sum across a 256-work-item group with `work_group_reduce_add()`, required in OpenCL 2.0 but optional in 3.0. rusticl lacks it (absent from `CL_DEVICE_OPENCL_C_FEATURES` and every libclc build), so those kernels fail with "use of undeclared identifier". This enables `dlprimitives`' existing `CUSTOM_REDUCE` fallback (shared memory plus a barrier). `tools/libclc-probe.c` checks for the feature. | custom-reduce-autodetect | — |
+| `01-reduce-barrier` | **Correctness fix.** The `CUSTOM_REDUCE` fallback has a race the built-in never had: every work-item reads the result from shared slot 0 after the last barrier, and work-item 0 can start the *next* reduction and overwrite it first. Softmax reduces twice in a row (max, then sum), so the `dlprimitives` softmax and log_softmax tests fail. Adds the missing barrier. | reduce-barrier | — |
+| `02-activation-dtype` | **Correctness fix**, not rusticl-specific. The activation kernel is written in terms of `dtype` (default `float`), but is built without the tensor's dtype, so half tensors are read and written as 4-byte floats and `relu`, `tanh`, `sigmoid` and `relu6` silently return garbage. Builds the kernel for the tensor's dtype, checks input and output dtypes match, and takes the backward `beta` as a float (what the host passes) cast in-kernel. All four then match CPU forward and backward to fp16 precision. | activation-half-dtype | 915 (stock) |
+| `03-winograd-ksplit-heuristic` | **Occupancy.** A rule decides when to split backward-filter work into slices across more of the GPU. It compared *work-items* against a core count, which on a 40-CU AMD device means "split only below 10 work-groups", so a 128→128 layer (16 work-groups) left 24 CUs idle. It now counts work-groups and targets about four per CU. | winograd-ksplit-heuristic | 984 |
+| `04-winograd-no-atomics` | **Atomics.** Both backward kernels have many work-groups adding into the same outputs via atomic add. This GPU has no hardware float atomic add (no RDNA before RDNA3 does), so each becomes a read-add-retry loop, 39% of the backward-filter kernel. The atomics only guard collisions *between* slices; within a slice each output has one writer. So each slice now writes its own scratch plane and a small kernel sums the planes, costing under 2% of what it replaces. Backward-data's 4×4 tiles overlap, but grouped by odd/even row and column they form four non-touching sets. Devices with real float atomics (NVIDIA, or `cl_ext_float_atomics`) keep the original path. | winograd-performance §1 | 1,477 |
+| `05-winograd-fwd-filter-layout` | **Access patterns.** Neighbouring lanes read far-apart addresses, using a few bytes of each cache line. Here, transformed filters are stored `[C][N]`, so the 32 lanes reading one input channel are contiguous. | winograd-performance §2 | 1,634 |
+| `06-winograd-bwd-filter-loads` | **Access patterns.** Backward-filter lanes map to neighbouring tiles of one image plane instead of 32 different planes, with vector loads on edge tiles. | winograd-performance §2 | 1,815 |
+| `07-bn-sums-grid-stride` | **Access patterns.** The BatchNorm sum walks memory with a stride instead of per-lane chunks that hit the same cache sets (13 of 359 GB/s). | winograd-performance §2 | 1,949 |
+| `08-winograd-prefetch` | **Prefetch.** Kernels used to load a slice, wait, then multiply. They now issue the next slice's loads *before* the current multiply, overlapping memory waits with arithmetic. | winograd-performance §3 | 2,068 |
+| `09-winograd-tr-offset` | **Scratch padding.** Tiles in LDS (shared on-chip memory) are padded to avoid bank conflicts, but any padding also allocates 16 extra tile rows: 40 KiB per work-group instead of 32, just too much for two work-groups per CU, halving parallelism (`tools/ocl-micro.c occ` measures the boundary). Dropping it pays off in the two backward kernels; forward keeps it. | winograd-lds-padding | 2,261 |
+| `10-winograd-fp16` | **fp16 inner loop, opt-in.** Tiles are converted to half on entry to shared memory and multiplied two at a time; tensors in memory stay fp32. Y/dX/dW land within ~0.5% of fp32, about 10× looser than NVIDIA's TF32 default, hence opt-in. | winograd-fp16-inner-loop | 2,918 |
+| `11-local-knobs` | The environment variables and the partials-hash diagnostic used for the measurements; inert unless set. | — | — |
 
-**`patches/pytorch_dlprim/`** — the extension itself.
+`patches/pytorch_dlprim/` — the extension itself.
 
 | patch | what |
 | --- | --- |
 | `01-half-fixes` | Makes convolution reject anything but float32 instead of silently returning NaN; fixes hardtanh/relu6/clamp for half tensors; makes the gradient contiguous in `hardtanh_backward`. Report: pytorch_dlprim-half-tensor-fixes. |
 | `02-gelu-mad` | `fma()` → `mad()` in GELU backward. On Mesa < 26.2 rusticl's `fma()` is a 563-instruction software emulation (3.8× on GELU backward). Redundant but harmless on 26.2+. |
-
-### Why the reduction fails to compile
-
-Softmax, cross-entropy, bias gradients and BatchNorm all need to add up one
-value across all 256 work-items of a group. `dlprimitives` does that with
-`work_group_reduce_add()`, a built-in that OpenCL 2.0 required and OpenCL 3.0
-made optional. rusticl does not provide it — the feature is missing from
-`CL_DEVICE_OPENCL_C_FEATURES` and no libclc build contains it — so those
-kernels fail to compile with "use of undeclared identifier".
-
-`dlprimitives` already carries a portable fallback that computes the same sum
-through shared memory and a barrier, behind `CUSTOM_REDUCE`; `00-custom-reduce`
-turns it on. `tools/libclc-probe.c` checks the feature directly.
-
-That fallback has a race of its own, which nothing with the built-in would
-ever see: after the last barrier every work-item reads the result from slot 0
-of the shared array, and nothing stops work-item 0 from starting the *next*
-reduction and overwriting slot 0 first. Softmax reduces twice back to back
-(max, then sum), and its unit tests fail. `01-reduce-barrier` adds the missing
-barrier.
-
-### What the convolution patches do
-
-Convolution is 89% of a ResNet-9 training step, and four fifths of that is
-the backward pass, so that is where the work went. In the order the series
-applies them:
-
-- **Occupancy** (`03`). The backward-filter kernel can cut its work into
-  slices and spread them over more of the GPU, and a rule decides when that is
-  worth doing. The rule compared a count of *work-items* against a core count,
-  which on a 40-CU AMD device works out as "split only if there are fewer than
-  10 work-groups". A 128→128 layer launches 16, so it ran on 16 compute units
-  with 24 idle. It now counts work-groups and aims to give each CU about four.
-- **Atomics** (`04`). Both backward kernels have many work-groups adding into
-  the same output values, so they used an atomic add to keep those additions
-  from stepping on each other. This GPU has no hardware float atomic add — no
-  RDNA GPU before RDNA3 does — so each one becomes a retry loop: read the
-  value, add to it, try to write it back, start over if another lane got
-  there first. That loop was 39% of the backward-filter kernel. But
-  the atomics were only guarding collisions *between* the parallel slices;
-  inside one slice every output has exactly one writer. Each slice now writes
-  into its own plane of scratch memory and a small second kernel adds the
-  planes together, for under 2% of the kernel it replaces. Backward-data gets
-  the same treatment: its 4×4 tiles do overlap, but sorting them by whether
-  their row and column are odd or even gives four groups whose members never
-  touch. Devices with a real float atomic add (NVIDIA, or anything advertising
-  `cl_ext_float_atomics`) keep the original path, where atomics are cheap.
-- **Access patterns** (`05`, `06`, `07`). Three places where neighbouring
-  lanes read far-apart addresses, so each read pulled in a cache line to use a
-  few bytes of it. The transformed filters are now stored `[C][N]`, which makes
-  the 32 lanes that read one input channel contiguous; backward-filter lanes
-  now map to neighbouring tiles of one image plane instead of to 32 different
-  planes, with vector loads on the edges; and the BatchNorm sum walks memory
-  with a stride rather than in per-lane chunks that kept landing in the same
-  cache sets (13 GB/s out of 359).
-- **Prefetch** (`08`). Each kernel used to load a slice of data, wait for it,
-  multiply, then load the next. It now issues the next slice's loads *before*
-  doing the current multiply, so the wait for memory overlaps with arithmetic
-  instead of stalling on it.
-- **Scratch padding** (`09`). The kernels pad their tiles in shared on-chip
-  memory (LDS) so that rows do not land on the same memory bank. The catch:
-  switching any padding on also makes the kernel allocate 16 extra tile rows,
-  40 KiB per work-group instead of 32, and that is just over the line where
-  two work-groups fit on a compute unit at once — so the padding was costing
-  half the parallelism (`tools/ocl-micro.c occ` measures the boundary).
-  Giving it up to win the second work-group back pays off in the two backward
-  kernels and does not in the forward one, which keeps its padding.
-- **fp16 inner loop, opt-in** (`10`). Tiles are converted to half on the way
-  into shared memory and multiplied two at a time; the tensors in memory stay
-  fp32. Y/dX/dW land within ~0.5% of the fp32 result — about 10× looser than
-  NVIDIA's TF32 default, which is why it is opt-in rather than on.
 
 ### Environment variables
 
@@ -176,11 +124,75 @@ DLPRIM_CONV_FP16               0 | 1         fp16 tiles + packed-fp16 multiply, 
 
 Setting both `*_PLANES` to `0` puts the emulated-atomic backward kernels
 back, with the rest of the series still on. This brings us down to 1,129
-img/s in `tools/profile-step.py` against 2,330 img/s for the full
+img/s in `tools/profile-step.py` against 2,261 img/s for the full
 series. Note that the first number needs `DLPRIM_WINOGRAD_TR_OFFSET=1`;
 the atomic kernels stall in their compare-and-swap loop rather than on
 occupancy. Without the scratch padding patch `09` gives up, we fall to
 792 img/s.
+
+## Using a release build
+
+`pt_ocl.so` replaces the native library inside the stock `pytorch_ocl` 0.2.0
+wheel, so you install the wheel first, then put the patched file over it. You
+need Python 3.12 on x86-64 Linux, with Mesa's rusticl driver and an OpenCL ICD
+loader installed.
+
+1. Create a venv with `torch==2.4.0` (CPU build) and the stock wheel:
+
+   ```
+   python3.12 -m venv ~/ocl-venv
+   ~/ocl-venv/bin/pip install "torch==2.4.0" --index-url https://download.pytorch.org/whl/cpu
+   ~/ocl-venv/bin/pip install \
+     "https://github.com/artyom-beilis/pytorch_dlprim/releases/download/0.2.0/pytorch_ocl-0.2.0+torch2.4-cp312-none-linux_x86_64.whl"
+   ```
+
+2. Download `pt_ocl.so` from the
+   [latest release](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases/latest)
+   and check that its `sha256sum` matches the digest on the release page:
+
+   ```
+   curl -LO https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases/latest/download/pt_ocl.so
+   sha256sum pt_ocl.so
+   ```
+
+3. Install it over the stock library and clear the kernel cache, whose
+   compiled kernels were built from the old source:
+
+   ```
+   install -m0644 pt_ocl.so ~/ocl-venv/lib/python3.12/site-packages/pytorch_ocl/pt_ocl.so
+   rm -f ~/.dlprimitives/cache.db
+   ```
+
+4. Run with `RUSTICL_ENABLE=radeonsi` set. Import `pytorch_ocl` to register the
+   device, then move tensors and models to `ocl:0`:
+
+   ```python
+   import torch, pytorch_ocl
+
+   dev = torch.device("ocl:0")
+   model = torch.nn.Linear(64, 10).to(dev)
+   x = torch.randn(32, 64).to(dev)
+   print(model(x).sum().item())
+   ```
+
+   ```
+   RUSTICL_ENABLE=radeonsi ~/ocl-venv/bin/python example.py
+   ```
+
+Convolutions accept float32 tensors only (see `01-half-fixes`). The first run
+of each layer shape is slow because the kernels compile on first use; later
+runs read them from `~/.dlprimitives/cache.db`. For the optional fp16 inner
+loop, set `DLPRIM_CONV_FP16=1` before the first convolution runs.
+
+## Reverting
+
+Reinstall the stock wheel and clear the cache:
+
+```
+scratch/venv/bin/pip install --force-reinstall --no-deps \
+  "https://github.com/artyom-beilis/pytorch_dlprim/releases/download/0.2.0/pytorch_ocl-0.2.0+torch2.4-cp312-none-linux_x86_64.whl"
+rm -f ~/.dlprimitives/cache.db
+```
 
 ## Building
 
@@ -206,41 +218,13 @@ output. Shipped builds are attached to
 [GitHub releases](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
 as `pt_ocl.so`; anyone can check one by rebuilding and comparing `sha256sum`.
 
-### Using the result
-
-Drop `pt_ocl.so` over the one in any venv that has the `pytorch_ocl` 0.2.0
-wheel and `torch==2.4.0`, then clear the kernel cache:
-
-```
-install -m0644 pt_ocl.so <venv>/lib/python3.12/site-packages/pytorch_ocl/pt_ocl.so
-rm -f ~/.dlprimitives/cache.db     # cached binaries are keyed to the old kernel source
-```
-
-Do not `cp` over a `pt_ocl.so` that a running process has loaded: `cp`
-rewrites the file in place and the process segfaults. Use `install` (it
-unlinks first) or stop the process.
-
-Run with `RUSTICL_ENABLE=radeonsi` in the environment. A quick check:
-
-```
-RUSTICL_ENABLE=radeonsi scratch/venv/bin/python tools/wino-repro.py 10   # expect 0 bad
-```
-
-### Reverting
-
-Reinstall the stock wheel and clear the cache:
-
-```
-scratch/venv/bin/pip install --force-reinstall --no-deps \
-  "https://github.com/artyom-beilis/pytorch_dlprim/releases/download/0.2.0/pytorch_ocl-0.2.0+torch2.4-cp312-none-linux_x86_64.whl"
-rm -f ~/.dlprimitives/cache.db
-```
-
 ## Environment these numbers come from
 
 AsRock BC-250 (gfx1013, 40 CU, 2.0 GHz, 16 GB unified), Linux 7.1, Mesa
 26.1.8 (Fedora 44) on the host and Mesa 26.2.2 (Fedora 45) in containers, LLVM
-22.1.8, `RUSTICL_ENABLE=radeonsi`. On Mesa 26.1 the system libclc also cannot
+22.1.8, `RUSTICL_ENABLE=radeonsi`. Throughput in the tables is the synthetic training step from
+`tools/profile-step.py`; the T4 comparison and the accuracy figures are from
+16-epoch ResNet-9 / CIFAR-10 runs at batch 128. On Mesa 26.1 the system libclc also cannot
 link `sin()`/`cos()` (so `torch.randn` on the device fails); Mesa's own libclc
 fork fixes that; `tools/mesa-dev/` builds an image with it.
 

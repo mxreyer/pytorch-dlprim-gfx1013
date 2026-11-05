@@ -30,6 +30,10 @@ which is 60.6 -> 53.8 ms of GPU time per step, and 2,069 -> 2,330 img/s
 on the same step measured without profiling.
 
 Gradients unchanged: the define only moves data within __local.
+
+The figures above are from the original investigation run. Re-measured
+patch by patch on the stacked series, this step is 2,068 -> 2,261 img/s;
+the README at https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
 ---
  src/core/conv.cpp | 28 ++++++++++++++++++++++++++++
  1 file changed, 28 insertions(+)
