@@ -252,47 +252,24 @@ release with `pt_ocl.so` and `pt_ocl-fixes-only.so` attached and their
 
 ## Reproducing the benchmarks
 
-Every speed-up quoted here — and in
-[pytorch-gpu-bc250](https://github.com/mxreyer/pytorch-gpu-bc250) and the
-[write-up](https://mxreyer.github.io/blog/bc250-ml-box/) — compares the full
-series against a build with only the fixes that make `pytorch_ocl` build and
-run correctly on rusticl. Stock `pytorch_ocl` cannot serve as that baseline:
-its loss, softmax and BatchNorm kernels do not compile here (`00`), so a
-training step never completes. The baseline is therefore its own build:
-
-| | `pt_ocl-fixes-only.so` (`./build.sh fixes`) | `pt_ocl.so` (`./build.sh`) |
-| --- | --- | --- |
-| `dlprimitives` | `00`–`02` | `00`–`11` |
-| `pytorch_dlprim` | `01-half-fixes` | `01`, `02` |
-| ResNet-9 training, `tools/profile-step.py 128 50` | 916 img/s | 2,436 img/s |
-
-`02-gelu-mad` is left out of the baseline because it is a speed workaround
-(for Mesa < 26.2); ResNet-9 has no GELU, so it does not touch the measured step.
-The `03`–`11` performance patches are all off in the baseline, not just
-disabled via environment variables: the variables from `11` only reach part of
-the series.
-
-Both files are attached to each release from v1.3.0 on. To compare them on your
-own board, set up the venv as in [Using a release build](#using-a-release-build),
-then, from a clone of this repository (for `tools/profile-step.py`), swap the
-library and clear the kernel cache before each run:
+The baseline is `pt_ocl-fixes-only.so` (`./build.sh fixes`), since stock
+`pytorch_ocl` cannot complete a training step here. From a clone of this repo,
+with the venv from [Using a release build](#using-a-release-build):
 
 ```
 REL=https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases/download/v1.3.0
 SITE=~/ocl-venv/lib/python3.12/site-packages/pytorch_ocl
 curl -fL -O "$REL/pt_ocl.so" -O "$REL/pt_ocl-fixes-only.so"
-sha256sum pt_ocl.so pt_ocl-fixes-only.so   # compare with the release page
 
 for so in pt_ocl-fixes-only.so pt_ocl.so; do
   install -m0644 "$so" "$SITE/pt_ocl.so"
   rm -f ~/.dlprimitives/cache.db
-  echo "== $so"
   RUSTICL_ENABLE=radeonsi ~/ocl-venv/bin/python tools/profile-step.py 128 50
 done
 ```
 
-The first run of each build compiles its kernels, so repeat it (the README's
-figures are the median of five runs, with the GPU clock pinned).
+Expect about 916 and 2,436 img/s. The first run compiles kernels, so repeat it;
+the quoted figures are medians of five runs with the GPU clock pinned.
 
 ## Environment these numbers come from
 
