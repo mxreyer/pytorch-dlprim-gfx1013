@@ -13,16 +13,18 @@ BC-250's gfx1013 GPU under Mesa's rusticl driver. Also contributes and opt-in fp
 inner loop for further speed-up.
 
 The target performance for this investigation was that of a cloud T4, which the BC-250 matches on paper when operated at 40 CUs / 2.0 GHz.
-Stock `pytorch_ocl`, however, trained ResNet-9 at a fraction of that. The
-patches from this repo close that gap. The before/after below is measured by
-`tools/profile-step.py`, which times the ResNet-9 training step at batch 128
-on random 3×32×32 input with 10 classes, so data loading is not included:
+Stock `pytorch_ocl`, however, trained ResNet-9 at under half the T4's rate.
+The patches from this repo close that gap and pass the T4 in fp32. All
+figures below are measured by `tools/profile-step.py`, which times the
+ResNet-9 training step at batch 128 on random 3×32×32 input with 10 classes,
+so data loading is not included:
 
 | | training img/s |
 | --- | ---: |
 | stock `pytorch_ocl` | 915 |
 | **with these patches** | **2,261** |
 | + opt-in fp16 inner loop (`DLPRIM_CONV_FP16=1`) | 2,918 |
+| T4 on Google Colab, fp32 (`PROFILE_DEVICE=cuda`) | 1,930 |
 
 In fp32, gradients match CPU references on every ResNet-9 layer shape; with
 the fp16 inner loop, values land within ~0.5% of fp32. The per-patch
