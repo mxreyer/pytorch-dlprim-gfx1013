@@ -52,11 +52,7 @@ kernel over three profiled runs:
 
 The forward kernel goes the other way and should keep its padding. Per
 direction, that is 60.6 → 53.8 ms of GPU time per training step, and
-2,069 → 2,330 img/s on the same step measured without profiling. Over a full
-16-epoch ResNet-9 / CIFAR-10 run, same binary, one define apart: training
-**1,993 → 2,244 img/s**, inference 6,732 → 6,774 (unchanged, as expected —
-there is no backward kernel in an inference pass), test accuracy 0.924 either
-way, 90% reached at epoch 13 either way.
+2,069 → 2,330 img/s on the same step measured without profiling.
 
 The step figures above are from the original investigation run. Re-measured
 patch by patch on the stacked series, the same step is 2,068 → 2,261 img/s;

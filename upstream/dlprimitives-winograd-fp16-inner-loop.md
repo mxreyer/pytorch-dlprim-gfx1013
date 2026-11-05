@@ -73,10 +73,6 @@ more halves the dW error at no measurable cost, so the patch raises the
 backward-filter split target in fp16 mode only — 16 work-groups per CU
 instead of 4, cap 64 instead of 16.
 
-Over a 16-epoch ResNet-9 / CIFAR-10 run the difference does not show:
-test accuracy 0.926 in fp16 mode against 0.924 in fp32, which is inside the
-run-to-run spread.
-
 ## What it depends on
 
 Both couplings are with changes filed separately, and neither is optional:
@@ -119,7 +115,7 @@ direction you have in mind for reduced precision generally?
 
 AMD BC-250 (gfx1013, 40 CU, 2.0 GHz), Mesa 26.1.8 and 26.2.2 rusticl on
 radeonsi, LLVM 22.1.8; `pytorch_dlprim` `1af48d4` with `dlprimitives`
-`ff2d590`. Throughput is a 16-epoch ResNet-9 / CIFAR-10 run at batch 128;
+`ff2d590`. Throughput is ResNet-9 training and inference at batch 128;
 kernel times are medians of three profiled runs with the clock pinned.
 Accuracy is the table above — note that the fp32 correctness sweeps the other
 reports cite (`tools/wino-repro.py`, 2e-4 relative) do not apply in this mode

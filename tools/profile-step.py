@@ -7,6 +7,12 @@ scratch/venv):
   RUSTICL_ENABLE=radeonsi scratch/venv/bin/python tools/profile-step.py 128 20        # wall clock only
   RUSTICL_ENABLE=radeonsi scratch/venv/bin/python tools/profile-step.py 128 10 prof   # + prof.csv (or a 4th arg)
 
+The same step runs on other devices for comparison, wall clock only; the
+device comes from PROFILE_DEVICE (default ocl:0), and pytorch_ocl is only
+needed for ocl. On an NVIDIA GPU, e.g. a Colab T4:
+
+  PROFILE_DEVICE=cuda python tools/profile-step.py 128 50
+
 Profiling forces per-kernel events and stretches the step by ~50%, so take the
 wall-clock number from an unprofiled run and only the breakdown from prof.csv
 (columns: section, kernel, start, end, duration in ms). This is the harness
@@ -15,7 +21,10 @@ augmentation - this measures the GPU step alone.
 
 MIT License, Copyright (c) 2026 mxreyer.
 """
-import sys, collections, csv, torch, pytorch_ocl  # noqa
+import os, sys, collections, csv, time, torch
+DEV = os.environ.get("PROFILE_DEVICE", "ocl:0")
+if DEV.startswith("ocl"):
+    import pytorch_ocl  # noqa: F401  (registers the "ocl" device)
 from torch import nn
 
 
@@ -50,8 +59,16 @@ class ResNet9(nn.Module):
 
 B = int(sys.argv[1]) if len(sys.argv) > 1 else 128
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-dev = torch.device("ocl:0")
+dev = torch.device(DEV)
 PROF = len(sys.argv) > 3 and sys.argv[3] == "prof"
+if PROF and dev.type != "ocl":
+    sys.exit("profiling uses pytorch_ocl's profiler; it only works on ocl")
+if dev.type == "cuda":
+    sync = torch.cuda.synchronize
+elif dev.type == "ocl":
+    sync = torch.ocl.synchronize
+else:
+    sync = lambda: None
 OUT = sys.argv[4] if len(sys.argv) > 4 else "prof.csv"
 if PROF: torch.ocl.enable_profiling(dev)
 torch.manual_seed(0)
@@ -62,12 +79,11 @@ x = torch.rand(B, 3, 32, 32, device=dev); y = torch.randint(0, 10, (B,), device=
 def step():
     loss = lossfn(model(x), y); opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
 for _ in range(5): step()
-torch.ocl.synchronize()
-import time
+sync()
 t0 = time.perf_counter()
 for _ in range(N): step()
-torch.ocl.synchronize(); wall = (time.perf_counter() - t0) / N
-print(f"batch {B}: {'profiled' if PROF else 'unprofiled'} step {wall*1e3:.1f} ms  = {B/wall:.0f} img/s")
+sync(); wall = (time.perf_counter() - t0) / N
+print(f"{dev} batch {B}: {'profiled' if PROF else 'unprofiled'} step {wall*1e3:.1f} ms  = {B/wall:.0f} img/s")
 if PROF:
     with torch.ocl.profile(dev, OUT):
         for _ in range(N): step()
