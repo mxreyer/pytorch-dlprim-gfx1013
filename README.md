@@ -9,8 +9,8 @@
 Patches and a build script that make
 [pytorch_dlprim](https://github.com/artyom-beilis/pytorch_dlprim) (`pytorch_ocl`,
 the OpenCL backend for PyTorch) work correctly and run fast on the AsRock
-BC-250's gfx1013 GPU under Mesa's rusticl driver. Also contributes and opt-in fp16
-inner loop for further speed-up.
+BC-250's gfx1013 GPU under Mesa's rusticl driver, plus an opt-in fp16
+inner loop for a further speed-up.
 
 The target performance for this investigation was that of a cloud T4, which
 the BC-250, operated at 40 CUs / 2.0 GHz, beats by about 25% in peak fp32 on
@@ -47,11 +47,9 @@ the fixes and the speed-up without building anything yourself; see
 also carries `pt_ocl-fixes-only.so`, built by `./build.sh fixes` with only the
 build and correctness fixes: the baseline every speed-up here and in the
 other BC-250 repositories is measured against, so those comparisons can be
-rerun; see [Reproducing the benchmarks](#reproducing-the-benchmarks). The build is reproducible,
-so a release can be checked by rebuilding at its tag and comparing `sha256sum`
-(kernel comments are compiled in, so later commits can change the hash). To ship
-a new build: run `./build.sh` and `./build.sh fixes`, then tag a release with
-`pt_ocl.so` and `pt_ocl-fixes-only.so` attached.
+rerun; see [Reproducing the benchmarks](#reproducing-the-benchmarks). The build is
+reproducible, so any release can be checked by rebuilding it at its tag; see
+[Building](#building).
 
 ## Overview
 
@@ -72,7 +70,10 @@ they were measured; `11` is local only. The performance work all goes into
 convolution: it is 89% of a ResNet-9 training step before the series, and four
 fifths of that is the backward pass. The last column provides benchmark numbers,
 in img/s, for the ResNet-9 training step at batch 128 with the series applied up
-to that patch, plus `patches/pytorch_dlprim/`.
+to that patch, plus `patches/pytorch_dlprim/`. Each row is its own build,
+measured in its own five runs, so the `09` and `10` rows differ slightly from the
+headline 2,436 and 3,147 (the shipped build, which also carries `10`–`11`); the
+gap is within run-to-run noise.
 
 | patch | what | report in `upstream/` | img/s after |
 | --- | --- | --- | ---: |
@@ -116,7 +117,9 @@ DLPRIM_WINOGRAD_KSPLIT_MAX     <n>           split-K cap (default 16)
 DLPRIM_WINOGRAD_SPLIT_PLANES   0 | 1         backward-filter without atomics (default 1
                                              unless the device is NVIDIA or has
                                              cl_ext_float_atomics)
-DLPRIM_WINOGRAD_BWD_PLANES     0 | 1         backward-data without atomics
+DLPRIM_WINOGRAD_BWD_PLANES     0 | 1         backward-data without atomics (same default,
+                                             and only if the four planes fit the
+                                             256 MiB workspace budget)
 DLPRIM_WINOGRAD_STRIDE_OFFSET  <n>           scratch-tile padding (default 0 on AMD)
 DLPRIM_WINOGRAD_TR_OFFSET      <n>           scratch-tile padding, transpose stage (default 1,
                                              but 0 in the backward kernels wherever the
@@ -129,15 +132,17 @@ DLPRIM_CONV_FP16               0 | 1         fp16 tiles + packed-fp16 multiply, 
                                              to 16 / 64 to keep fp16 sums short. Read at
                                              kernel compile time, so set it before the first
                                              convolution.
+DLPRIM_DEBUG_PARTIALS_HASH     (any value)   diagnostic: read back the backward-filter
+                                             split-K partials after each kernel and report
+                                             the first run-to-run difference (slow)
 ```
 
 Setting both `*_PLANES` to `0` puts the emulated-atomic backward kernels
-back, with the rest of the series still on. This brings us down to 1,191
-img/s in `tools/profile-step.py` against 2,436 img/s for the full
-series. Note that the first number needs `DLPRIM_WINOGRAD_TR_OFFSET=1`;
-the atomic kernels stall in their compare-and-swap loop rather than on
-occupancy. With `DLPRIM_WINOGRAD_TR_OFFSET` unset, so that patch `09` drops the
-backward kernels' padding, we fall to 801 img/s.
+back, with the rest of the series still on: `tools/profile-step.py` then
+gives 1,191 img/s, against 2,436 for the full series. That figure is with
+`DLPRIM_WINOGRAD_TR_OFFSET=1`, because the atomic kernels are bound by their
+compare-and-swap loop rather than by occupancy, so they gain nothing from
+patch `09` dropping the padding; with it unset they fall to 801 img/s.
 
 ## Using a release build
 
@@ -215,8 +220,9 @@ rm -f ~/.dlprimitives/cache.db
 ./build.sh fixes    # build/correctness fixes only -> ./pt_ocl-fixes-only.so
 ```
 
-Requires `python3.12`, `python3.12-devel`, `cmake`, `git`, `sqlite-devel`,
-`OpenCL-ICD-Loader-devel`. The script is self-contained:
+Requires `python3.12`, `python3.12-devel`, `gcc-c++`, `make`, `cmake`, `git`,
+`binutils` (for `strip`), `sqlite-devel` and `OpenCL-ICD-Loader-devel` (Fedora
+package names). The script is self-contained:
 
 1. Creates a Python 3.12 venv in `./scratch/venv/` with `torch==2.4.0` (CPU)
    and the `pytorch_ocl` 0.2.0 wheel. Reused between runs; `rm -rf scratch/`
@@ -227,14 +233,22 @@ Requires `python3.12`, `python3.12-devel`, `cmake`, `git`, `sqlite-devel`,
    `tools/wino-repro.py` and `tools/bn-check.py`.
 3. Builds and leaves the stripped extension at `./pt_ocl.so`
    (`./pt_ocl-fixes-only.so` for `./build.sh fixes`, which applies only
-   `dlprimitives` `00`–`02` and `pytorch_dlprim` `01`).
+   `dlprimitives` `00`–`02` and `pytorch_dlprim` `01`). It compiles with
+   `-j4` because each source file peaks around 1.5 GB of RAM; set `JOBS=N` to
+   change that.
 
 The build is reproducible: source paths are mapped out (`-ffile-prefix-map`)
 and no RPATH is embedded, so two runs at the pinned commits give byte-identical
 output. Shipped builds are attached to
 [GitHub releases](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
-as `pt_ocl.so` and, from v1.3.0, `pt_ocl-fixes-only.so`; anyone can check one by rebuilding at its tag and comparing
-`sha256sum`.
+as `pt_ocl.so` and, from v1.3.0, `pt_ocl-fixes-only.so`; anyone can check one
+by rebuilding at its tag and comparing `sha256sum`. Rebuild at the tag itself,
+not a later commit: kernel source, comments included, is compiled into the
+library, so any later change to it changes the hash.
+
+To ship a new release: run `./build.sh` and `./build.sh fixes`, then tag a
+release with `pt_ocl.so` and `pt_ocl-fixes-only.so` attached and their
+`sha256sum` digests in the notes.
 
 ## Reproducing the benchmarks
 
@@ -260,7 +274,8 @@ the series.
 
 Both files are attached to each release from v1.3.0 on. To compare them on your
 own board, set up the venv as in [Using a release build](#using-a-release-build),
-then swap the library and clear the kernel cache before each run:
+then, from a clone of this repository (for `tools/profile-step.py`), swap the
+library and clear the kernel cache before each run:
 
 ```
 REL=https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases/download/v1.3.0
@@ -277,7 +292,7 @@ done
 ```
 
 The first run of each build compiles its kernels, so repeat it (the README's
-figures are the median of five runs).
+figures are the median of five runs, with the GPU clock pinned).
 
 ## Environment these numbers come from
 
