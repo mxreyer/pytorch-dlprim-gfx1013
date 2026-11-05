@@ -91,7 +91,11 @@ that patch.
 ### Environment variables
 
 `DLPRIM_CONV_FP16` is added by `patches/dlprimitives/10`, the rest by `11`.
-These are read only when the caller asks for auto; an explicitly passed algorithm wins. Unset, they change nothing.
+Unset, none of them change anything. The four `*_ALGO` variables override the
+algorithm choice whenever `dlprimitives` is left to pick one, which
+`pytorch_ocl` always does; a model run through `dlprimitives` directly can
+still name an algorithm itself, and that wins. The other variables apply
+whenever the Winograd kernels run.
 
 ```
 DLPRIM_CONV_ALGO               auto | winograd | gemm | depthwise_separable
