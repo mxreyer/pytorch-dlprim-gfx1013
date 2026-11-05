@@ -288,6 +288,14 @@ Google Colab. On Mesa 26.1 the system libclc also cannot
 link `sin()`/`cos()` (so `torch.randn` on the device fails); Mesa's own libclc
 fork fixes that; `tools/mesa-dev/` builds an image with it.
 
+## Related repositories
+
+| Repository | What it is |
+| --- | --- |
+| [pytorch-gpu-bc250](https://github.com/mxreyer/pytorch-gpu-bc250) | Getting PyTorch onto the BC-250's GPU on bare metal with this repo's `pt_ocl.so`, plus the end-to-end ResNet-9 / CIFAR-10 comparison against a cloud T4 and other CUDA GPUs (harness, protocol, every result). |
+| [bc250-jupyterhub-opencl-k3s](https://github.com/mxreyer/bc250-jupyterhub-opencl-k3s) | Serves the GPU to several users as JupyterHub notebooks on single-node k3s; the notebook image fetches this repo's `pt_ocl.so` release. |
+| [blog](https://github.com/mxreyer/blog) | The write-up of the whole project, [published here](https://mxreyer.github.io/blog/bc250-ml-box/). |
+
 ---
 
 *Co-authored with [Claude Code](https://claude.com/claude-code) (Claude Opus 5).*
