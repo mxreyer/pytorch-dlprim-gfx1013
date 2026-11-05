@@ -1,4 +1,4 @@
-# dlprimitives: Winograd kernels — atomics-free backward paths, four access-pattern fixes, prefetch (2.1× on ResNet-9 training)
+# dlprimitives: Winograd kernels — atomics-free backward paths, four access-pattern fixes, prefetch (2.2× on ResNet-9 training)
 
 **Where to file:** https://github.com/artyom-beilis/dlprimitives/issues — as a
 discussion first, then PRs
@@ -7,19 +7,17 @@ discussion first, then PRs
 ## Summary
 
 Profiling ResNet-9 training on an AMD BC-250 (gfx1013, 40 CU, Mesa rusticl)
-found that 89% of a step is convolution and 77% is the three Winograd
-kernels. Five changes to them take the step from 972 img/s (after the
-split-K fix filed separately) to 2,055, with gradients matching CPU references
+found that 89% of a step is convolution and 88% is the three Winograd
+kernels. Five changes to them take the step from 982 img/s (after the
+split-K fix filed separately) to 2,147, with gradients matching CPU references
 over 900 sweeps of the six layer shapes. They are a stacked series of five
 patches, one per item below, in `patches/dlprimitives/04`–`08` at
 https://github.com/mxreyer/pytorch-dlprim-gfx1013 (`git format-patch` output
-with the commit messages). The per-section numbers below are from the
-investigation, in the order the changes were found; re-measured patch by
-patch on the stacked series the steps are 984 → 1,477 → 1,634 → 1,815 →
-1,949 → 2,068 img/s (the README there has the table). I would like to know
+with the commit messages). Patch by patch the steps are 982 → 1,490 → 1,673 →
+1,861 → 2,000 → 2,147 img/s (the README there has the table). I would like to know
 which of these you want as PRs and how you would prefer them gated.
 
-## 1. Backward kernels without `atomic_addf` (972 → 1,374 img/s) — `04-winograd-no-atomics`
+## 1. Backward kernels without `atomic_addf` (982 → 1,490 img/s) — `04-winograd-no-atomics`
 
 Both backward kernels have many work-groups adding into the same output
 values, so they accumulate through `atomic_addf`. On a device with no hardware
@@ -45,41 +43,43 @@ conflict-free. Four planes, one per class, and the reduce masks the border
 elements that no tile of a class reaches (which also makes the old
 zero-fill/pre-scale pass unnecessary).
 
-The reduce costs under 2% of the kernel it replaces. On NVIDIA and gfx11+ the
+The two reduce kernels cost 1.6% of the atomic kernels they replace. On NVIDIA and gfx11+ the
 atomics are cheap and the planes would only cost workspace and an extra
 kernel, so the patch selects the planes when the device is not NVIDIA and does
 not advertise `cl_ext_float_atomics`, and keeps the atomic path otherwise.
 
-## 2. Four access patterns (1,374 → 1,816 img/s, inference 4,433 → 6,418) — `05`, `06`, `07`
+## 2. Four access patterns (1,490 → 2,000 img/s, inference 4,825 → 6,930) — `05`, `06`, `07`
 
-Three places where neighbouring lanes were reading far-apart addresses, so
+Three places, four patterns, where neighbouring lanes were reading far-apart addresses, so
 each read pulled in a cache line to use a few bytes of it. Each was found by
 timing a wrong-but-cheap variant of one stage:
 
 - `05-winograd-fwd-filter-layout`: the transformed filters are read at a
   `C × 64`-byte lane stride — 39% of the kernel. Storing them `[C][N]` instead
   of `[N][C]` makes the 32 lanes that read one input channel for 32 output
-  features contiguous. Forward Winograd 24.4 → 15.0 ms per step.
+  features contiguous. Forward Winograd 24.3 → 15.0 ms per step.
 - `06-winograd-bwd-filter-loads`: lanes map to neighbouring tiles of one
   channel plane (`k = lid % 8`) rather than to 32 different planes, which had
   every lane reading a different image. Edge tiles use one bounded `vload4`
-  per row with the columns masked, instead of a scalar path. 27.0 → 19.4 ms.
+  per row with the columns masked, instead of a scalar path. 27.0 → 19.3 ms.
 - `07-bn-sums-grid-stride`: a grid-stride reduction loop instead of one
   contiguous chunk per work-item. With 512 channels at 8×8, the chunked
   version put every second lane 128 KB apart, so they kept landing in the same
-  cache sets and the kernel ran at 13 GB/s on a 359 GB/s machine. BatchNorm
-  9.6 → ~3 ms per step.
+  cache sets and the kernel ran at 13 GB/s on a 351 GB/s machine. BatchNorm
+  9.3 → 4.4 ms per step.
 
 These are plain coalescing changes and should help everywhere, but they touch
 the hottest kernels in the library and I have one device, so they need your
 numbers on NVIDIA/Intel before merging.
 
-## 3. Register prefetch (1,816 → 2,055 img/s) — `08-winograd-prefetch`
+## 3. Register prefetch (2,000 → 2,147 img/s) — `08-winograd-prefetch`
 
 Each K step used to load its data, wait for it, then do its arithmetic. All
 three kernels now issue the *next* step's global loads before the current
 step's GEMM and do the transform and LDS store afterwards, so the memory
-latency overlaps with work instead of stalling on it. Step 65.0 → 59.8 ms.
+latency overlaps with work instead of stalling on it. GPU time per step goes
+62.7 → 58.5 ms: forward 15.0 → 13.3 and backward-data 16.0 → 13.4, while
+backward-filter stays at 19.3.
 LDS double-buffering was measured too and lost to the occupancy it costs;
 documented, not included.
 
@@ -88,16 +88,17 @@ documented, not included.
 Two further changes sit on top of this series and are their own reports,
 because each asks a different question: `winograd-lds-padding` (the transpose
 padding costs a resident work-group in the backward kernels) and
-`winograd-fp16-inner-loop` (an opt-in fp16 GEMM, +45% with an accuracy
+`winograd-fp16-inner-loop` (an opt-in fp16 GEMM, +29% with an accuracy
 trade-off to decide on). Both depend on the patches above and say so.
 
 ## Environment
 
-AMD BC-250 (gfx1013, 40 CU, 2.0 GHz), Mesa 26.1.8 and 26.2.2 rusticl on
+AMD BC-250 (gfx1013, 40 CU, 2.0 GHz), Linux 7.2.7, Mesa 26.2.3 rusticl on
 radeonsi, LLVM 22.1.8; `pytorch_dlprim` `1af48d4` with `dlprimitives`
-`ff2d590`. Correctness: Y, dW and dX compared against CPU over the six
-ResNet-9 3x3 shapes (900 sweeps, all within 1e-5 relative), BatchNorm
-forward and backward within 7e-7 of CPU, and backward-data checked on odd
+`ff2d590`. Throughput comes from `tools/profile-step.py` (inference with
+`PROFILE_MODE=infer`). Correctness, on the complete series: Y, dW and dX
+compared against CPU over the six ResNet-9 3x3 shapes (`tools/wino-repro.py 900
+1e-5`, no failures), BatchNorm forward and backward within 7e-7 of CPU, and backward-data checked on odd
 spatial sizes, 1–2 pixel images and gradient accumulation (beta = 1) for the
 plane border masks.
 

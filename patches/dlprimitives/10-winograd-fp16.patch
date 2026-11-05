@@ -7,21 +7,20 @@ convert their tiles to half on the way into LDS and run the register-tile
 GEMM as half2 mad with half accumulation over one work-group's K slice
 (packed v_pk_fma_f16, twice the fp32 rate on RDNA). Tensors in global
 memory stay fp32; the backward-filter split-K target is raised (16 per CU,
-cap 64) so the fp16 sums stay short, which halves the dW error.
+cap 64) so the fp16 sums stay short, which halves the dW error for about
+2.7% of the speed.
 
-On an AMD gfx1013: forward 15.0 -> 8.9 ms, backward-data 16.0 -> 10.2,
-backward-filter 19.4 -> 12.4 per ResNet-9 step, 2,055 -> 2,987 img/s.
-Y/dX/dW within ~0.5% of fp32, about 10x looser than TF32, hence opt-in.
+On an AMD gfx1013: forward 13.3 -> 7.6 ms, backward-data 10.5 -> 8.1,
+backward-filter 15.0 -> 10.9 per ResNet-9 step, 2,436 -> 3,147 img/s.
+Y/dX/dW within 0.9% of fp32, typically ~0.5%, about 10x looser than TF32,
+hence opt-in.
 A variant with fp32 accumulation via v_fma_mix_f32 was measured too:
 TF32-class accuracy but slower than plain fp32 on this chip.
 
 The LDS-residency rule from the previous patch is told about the half-sized
 tiles: with LTYPE half a padded work-group is 20 KiB, two of them fit, and
-the padding stays. Measured either way in fp16 mode, 2,889-2,901 img/s.
-
-The figures above are from the original investigation run. Re-measured
-patch by patch on the stacked series, this step is 2,261 -> 2,918 img/s;
-the README at https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
+the padding stays. Measured either way in fp16 mode, padded is the faster:
+3,148 against 3,071 img/s.
 ---
  src/core/conv.cpp                  | 32 +++++++++++---
  src/kernels/winograd_bwd_data.cl   | 68 ++++++++++++++++++++++++++---
@@ -49,8 +48,8 @@ index bd41563..50b5f7f 100644
 +    // run their register-tile GEMM in fp16 (packed v_pk_fma_f16, twice the
 +    // fp32 rate on RDNA), with fp16 accumulation over one work-group's K
 +    // slice. Tensors in global memory stay fp32. Measured on an AMD gfx1013:
-+    // forward 15.0 -> 8.9 ms, backward-data 16.0 -> 10.2, backward-filter
-+    // 19.4 -> 12.4 per ResNet-9 step; Y/dX within ~0.5% of fp32, dW ~0.5%
++    // forward 13.3 -> 7.6 ms, backward-data 10.5 -> 8.1, backward-filter
++    // 15.0 -> 10.9 per ResNet-9 step; Y/dX within 0.9% of fp32, dW 0.7%
 +    // with the shorter K slices below. Off by default: fp32 callers get fp32.
 +    static bool conv_fp16()
 +    {
@@ -91,11 +90,11 @@ index bd41563..50b5f7f 100644
 @@ -479,13 +495,16 @@ namespace core {
              // below CU/4 (AMD) or CU/2 (NVIDIA) work-groups: on a 40-CU part a
              // 128->128 layer ran its 16 work-groups unsplit with 24 CUs idle.
-             // Aim for ~4 work-groups per CU (8, 16 and 32 measured the same),
+             // Aim for ~4 work-groups per CU (8 the same, 16 and 32 ~1% slower),
 -            // and never split a slice below 16 K items.
 +            // and never split a slice below 16 K items. With the fp16 inner
 +            // loop, shorter K slices halve the accumulation error (dW 1.1% ->
-+            // 0.5%) at no measured cost.
++            // 0.5%) for about 2.7% of the speed.
              int wg_count = ((config_.channels_in + 31) / 32)
                           * ((config_.channels_out + 31) / 32);
              int cu = ctx.device().getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>();

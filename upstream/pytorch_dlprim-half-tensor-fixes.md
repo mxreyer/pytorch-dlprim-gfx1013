@@ -43,7 +43,7 @@ relu, tanh and sigmoid on half return garbage until that is fixed too.)
 
 ## Environment
 
-AMD BC-250 (gfx1013), Mesa rusticl 26.1.8 / 26.2.2, torch 2.4.0,
+AMD BC-250 (gfx1013), Mesa rusticl 26.1.8 / 26.2.2 / 26.2.3, torch 2.4.0,
 `pytorch_ocl` 0.2.0 rebuilt from `1af48d4`.
 
 ## Disclosure

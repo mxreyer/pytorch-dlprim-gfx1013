@@ -10,7 +10,8 @@ step k+WG_K before step k's GEMM and transform/store them after it. The
 load helpers return the untransformed tile for that; the transforms are
 unchanged.
 
-ResNet-9 training step 65.0 -> 59.8 ms on an AMD gfx1013. LDS
+GPU time per ResNet-9 training step 62.7 -> 58.5 ms on an AMD gfx1013: forward
+and backward-data gain, backward-filter does not move. LDS
 double-buffering was measured as well and lost to occupancy.
 ---
  src/kernels/winograd_bwd_data.cl   | 39 ++++++++++++----

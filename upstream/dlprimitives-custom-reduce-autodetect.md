@@ -34,8 +34,8 @@ The catch is that OpenCL 3.0 made those built-ins optional. A device may
 report OpenCL 3.x and still not have them, and that is exactly what happens
 here: rusticl reports OpenCL 3.1 but does not list
 `__opencl_c_work_group_collective_functions` in `CL_DEVICE_OPENCL_C_FEATURES`
-(verified on Mesa 26.1.8 and 26.2.2, radeonsi gfx1013 — the feature list
-contains only `__opencl_c_integer_dot_product_input_4x8bit`), and no libclc
+(verified on Mesa 26.1.8, 26.2.2 and 26.2.3, radeonsi gfx1013 — on 26.2.3 the
+feature list has ten entries, none of them a collective), and no libclc
 build implements the functions either. So the version check passes, and the
 built-ins are simply not there.
 

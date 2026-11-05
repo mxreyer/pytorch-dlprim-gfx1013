@@ -6,11 +6,14 @@
 //   gcc -O2 -o fp16-micro tools/fp16-micro.c -lOpenCL
 //   RUSTICL_ENABLE=radeonsi ./fp16-micro
 //
-// Times the same dependent mad() chain in float, half, half2 and float2,
+// Times the same dependent mad() chain in float and half, scalar and vector,
 // 8 independent chains per work-item so the ALUs have something to overlap.
-// gfx1013 has packed fp16 (v_pk_fma_f16: two fp16 FMAs per lane per cycle),
-// so half2 should reach ~2x the float GFLOP/s if the compiler uses it.
-// The ratio is the answer; absolute numbers include launch overhead.
+// gfx1013 has packed fp16 (v_pk_fma_f16: two fp16 FMAs per lane per cycle).
+// Two rows read low, so compare half8 with ocl-micro's float mad (about 2.3x):
+// - float reaches about half the rate of ocl-micro's mad loop (cause unknown).
+// - half2 is packed, but ACO also copies each loop register one halfword at a
+//   time, 25 vector instructions per iteration where half4's loop takes 16.
+// Absolute numbers include launch overhead.
 //
 // MIT License, Copyright (c) 2026 mxreyer.
 #define CL_TARGET_OPENCL_VERSION 300

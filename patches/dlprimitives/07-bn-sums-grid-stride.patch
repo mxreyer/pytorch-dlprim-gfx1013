@@ -8,7 +8,7 @@ elements, so neighbouring lanes read addresses that far apart and, for a
 hit the same cache sets on every step: 1.27 ms for 16 MB (13 GB/s) on an
 AMD gfx1013. A grid-stride loop has the lanes of a wave read consecutive
 elements of one row at every step, about 15x faster there. BatchNorm
-9.6 -> ~3 ms per ResNet-9 training step.
+9.3 -> 4.4 ms per ResNet-9 training step.
 ---
  src/kernels/bn_sums.cl | 46 ++++++++++++++++++------------------------
  1 file changed, 20 insertions(+), 26 deletions(-)
