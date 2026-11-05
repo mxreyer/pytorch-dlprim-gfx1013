@@ -197,6 +197,45 @@ of each layer shape is slow because the kernels compile on first use; later
 runs read them from `~/.dlprimitives/cache.db`. For the optional fp16 inner
 loop, set `DLPRIM_CONV_FP16=1` before the first convolution runs.
 
+## Reverting
+
+Reinstall the stock wheel and clear the cache (for a `build.sh` venv, use
+`scratch/venv/bin/pip` instead):
+
+```
+~/ocl-venv/bin/pip install --force-reinstall --no-deps \
+  "https://github.com/artyom-beilis/pytorch_dlprim/releases/download/0.2.0/pytorch_ocl-0.2.0+torch2.4-cp312-none-linux_x86_64.whl"
+rm -f ~/.dlprimitives/cache.db
+```
+
+## Building
+
+```
+./build.sh          # all patches                  -> ./pt_ocl.so
+./build.sh fixes    # build/correctness fixes only -> ./pt_ocl-fixes-only.so
+```
+
+Requires `python3.12`, `python3.12-devel`, `cmake`, `git`, `sqlite-devel`,
+`OpenCL-ICD-Loader-devel`. The script is self-contained:
+
+1. Creates a Python 3.12 venv in `./scratch/venv/` with `torch==2.4.0` (CPU)
+   and the `pytorch_ocl` 0.2.0 wheel. Reused between runs; `rm -rf scratch/`
+   to start clean.
+2. Fetches `pytorch_dlprim` at the commit pinned in `build.sh` (submodule
+   checked against its own pin), applies the patches. Bumping the pins
+   is a deliberate step: re-check every `git apply`, rebuild, re-run
+   `tools/wino-repro.py` and `tools/bn-check.py`.
+3. Builds and leaves the stripped extension at `./pt_ocl.so`
+   (`./pt_ocl-fixes-only.so` for `./build.sh fixes`, which applies only
+   `dlprimitives` `00`–`02` and `pytorch_dlprim` `01`).
+
+The build is reproducible: source paths are mapped out (`-ffile-prefix-map`)
+and no RPATH is embedded, so two runs at the pinned commits give byte-identical
+output. Shipped builds are attached to
+[GitHub releases](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
+as `pt_ocl.so` and, from v1.3.0, `pt_ocl-fixes-only.so`; anyone can check one by rebuilding at its tag and comparing
+`sha256sum`.
+
 ## Reproducing the benchmarks
 
 Every speed-up quoted here — and in
@@ -238,48 +277,7 @@ done
 ```
 
 The first run of each build compiles its kernels, so repeat it (the README's
-figures are the median of five runs). To build the two files yourself instead,
-run `./build.sh fixes` and `./build.sh`; at a release tag, the `sha256sum`s
-match the release's (see [Building](#building)).
-
-## Reverting
-
-Reinstall the stock wheel and clear the cache (for a `build.sh` venv, use
-`scratch/venv/bin/pip` instead):
-
-```
-~/ocl-venv/bin/pip install --force-reinstall --no-deps \
-  "https://github.com/artyom-beilis/pytorch_dlprim/releases/download/0.2.0/pytorch_ocl-0.2.0+torch2.4-cp312-none-linux_x86_64.whl"
-rm -f ~/.dlprimitives/cache.db
-```
-
-## Building
-
-```
-./build.sh          # all patches                  -> ./pt_ocl.so
-./build.sh fixes    # build/correctness fixes only -> ./pt_ocl-fixes-only.so
-```
-
-Requires `python3.12`, `python3.12-devel`, `cmake`, `git`, `sqlite-devel`,
-`OpenCL-ICD-Loader-devel`. The script is self-contained:
-
-1. Creates a Python 3.12 venv in `./scratch/venv/` with `torch==2.4.0` (CPU)
-   and the `pytorch_ocl` 0.2.0 wheel. Reused between runs; `rm -rf scratch/`
-   to start clean.
-2. Fetches `pytorch_dlprim` at the commit pinned in `build.sh` (submodule
-   checked against its own pin), applies the patches. Bumping the pins
-   is a deliberate step: re-check every `git apply`, rebuild, re-run
-   `tools/wino-repro.py` and `tools/bn-check.py`.
-3. Builds and leaves the stripped extension at `./pt_ocl.so`
-   (`./pt_ocl-fixes-only.so` for `./build.sh fixes`, which applies only
-   `dlprimitives` `00`–`02` and `pytorch_dlprim` `01`).
-
-The build is reproducible: source paths are mapped out (`-ffile-prefix-map`)
-and no RPATH is embedded, so two runs at the pinned commits give byte-identical
-output. Shipped builds are attached to
-[GitHub releases](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
-as `pt_ocl.so` and, from v1.3.0, `pt_ocl-fixes-only.so`; anyone can check one by rebuilding at its tag and comparing
-`sha256sum`.
+figures are the median of five runs).
 
 ## Environment these numbers come from
 
