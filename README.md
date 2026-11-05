@@ -52,7 +52,7 @@ a new build: run `./build.sh`, then tag a release with `pt_ocl.so` attached.
 
 | file | description |
 | --- | --- |
-| `tools/` | Microbenchmarks (`ocl-micro.c`, `libclc-probe.c`, `fp16-micro.c`), correctness sweeps (`wino-repro.py`, `bn-check.py`, ...), a Mesa-from-source container (`mesa-dev/`). |
+| `tools/` | Microbenchmarks (`ocl-micro.c`, `libclc-probe.c`, `fp16-micro.c`), a Mesa source check for work-group collectives (`check-mesa-collectives.sh`), correctness sweeps (`wino-repro.py`, `bn-check.py`, ...), a Mesa-from-source container (`mesa-dev/`). |
 | `upstream/` | Reports ready to file: five bugs and two proposals for `dlprimitives`, one for `pytorch_dlprim`. |
 | `patches/` | Everything `build.sh` applies, per target; the `dlprimitives` series is one patch per report. |
 
