@@ -94,7 +94,11 @@ to that patch, plus `patches/pytorch_dlprim/`.
 ### Environment variables
 
 `DLPRIM_CONV_FP16` is added by `patches/dlprimitives/10`, the rest by `11`.
-These are read only when the caller asks for auto; an explicitly passed algorithm wins. Unset, they change nothing.
+Unset, none of them change anything. The four `*_ALGO` variables override the
+algorithm choice whenever `dlprimitives` is left to pick one, which
+`pytorch_ocl` always does; a model run through `dlprimitives` directly can
+still name an algorithm itself, and that wins. The other variables apply
+whenever the Winograd kernels run.
 
 ```
 DLPRIM_CONV_ALGO               auto | winograd | gemm | depthwise_separable
@@ -127,8 +131,8 @@ back, with the rest of the series still on. This brings us down to 1,191
 img/s in `tools/profile-step.py` against 2,436 img/s for the full
 series. Note that the first number needs `DLPRIM_WINOGRAD_TR_OFFSET=1`;
 the atomic kernels stall in their compare-and-swap loop rather than on
-occupancy. Without the scratch padding patch `09` gives up, we fall to
-801 img/s.
+occupancy. With `DLPRIM_WINOGRAD_TR_OFFSET` unset, so that patch `09` drops the
+backward kernels' padding, we fall to 801 img/s.
 
 ## Using a release build
 
