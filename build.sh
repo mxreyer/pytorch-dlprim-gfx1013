@@ -6,10 +6,37 @@
 # (gitignored) with torch 2.4.0 + the pytorch_ocl 0.2.0 wheel, fetches the
 # pinned upstream sources, applies the patches, and leaves the rebuilt
 # pt_ocl.so next to this script.
+#
+#   ./build.sh          all patches                   -> pt_ocl.so
+#   ./build.sh fixes    build/correctness fixes only  -> pt_ocl-fixes-only.so
+#
+# The "fixes" variant is the baseline the README's benchmark tables start
+# from: dlprimitives 00-02 and pytorch_dlprim 01, no performance work.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRATCH="$HERE/scratch"
 VENV="$SCRATCH/venv"
+
+VARIANT="${1:-all}"
+case "$VARIANT" in
+    all)
+        DLPRIMITIVES_PATCHES=("$HERE"/patches/dlprimitives/[0-9][0-9]-*.patch)
+        PYTORCH_DLPRIM_PATCHES=("$HERE"/patches/pytorch_dlprim/[0-9][0-9]-*.patch)
+        OUT="pt_ocl.so"
+        ;;
+    fixes)
+        # 00 build fix, 01-02 correctness fixes; 01-half-fixes is correctness.
+        # Left out: dlprimitives 03-11 (performance, knobs) and
+        # pytorch_dlprim 02-gelu-mad (a speed workaround for Mesa < 26.2).
+        DLPRIMITIVES_PATCHES=("$HERE"/patches/dlprimitives/0[0-2]-*.patch)
+        PYTORCH_DLPRIM_PATCHES=("$HERE"/patches/pytorch_dlprim/01-*.patch)
+        OUT="pt_ocl-fixes-only.so"
+        ;;
+    *)
+        echo "usage: $0 [all|fixes]" >&2
+        exit 2
+        ;;
+esac
 
 # The torch the wheel was built against; pybind11 for the extension build.
 TORCH_VERSION="2.4.0"
@@ -49,12 +76,14 @@ if [[ "$got" != "$DLPRIMITIVES_COMMIT" ]]; then
     exit 1
 fi
 
-echo "== applying patches =="
+echo "== applying patches ($VARIANT) =="
 # patches/<target>/NN-*.patch, in numeric order; README.md lists what each does.
-for p in "$HERE"/patches/dlprimitives/[0-9][0-9]-*.patch; do
+for p in "${DLPRIMITIVES_PATCHES[@]}"; do
+    echo "   dlprimitives/$(basename "$p")"
     git -C "$SCRATCH/src/dlprimitives" apply "$p"
 done
-for p in "$HERE"/patches/pytorch_dlprim/[0-9][0-9]-*.patch; do
+for p in "${PYTORCH_DLPRIM_PATCHES[@]}"; do
+    echo "   pytorch_dlprim/$(basename "$p")"
     git -C "$SCRATCH/src" apply "$p"
 done
 
@@ -92,4 +121,4 @@ echo "  - to try it in the scratch venv:"
 echo "      install -m0644 '$HERE/pt_ocl.so' '$VENV/lib/python3.12/site-packages/pytorch_ocl/pt_ocl.so'"
 echo "      rm -f ~/.dlprimitives/cache.db   # old cache keyed to the old kernel source"
 echo "      RUSTICL_ENABLE=radeonsi '$VENV/bin/python' '$HERE/tools/wino-repro.py' 10"
-echo "  - to ship it: sha256sum pt_ocl.so, attach to a GitHub release"
+echo "  - to ship it: sha256sum $OUT, attach to a GitHub release"

@@ -28,7 +28,7 @@ classes, so data loading is not included:
 
 | | training img/s |
 | --- | ---: |
-| `pytorch_ocl` with `00`–`02` only | 916 |
+| `pytorch_ocl` with `00`–`02` only ([`pt_ocl-fixes-only.so`](#reproducing-the-benchmarks)) | 916 |
 | **with these patches** | **2,436** |
 | + opt-in fp16 inner loop (`DLPRIM_CONV_FP16=1`) | 3,147 |
 | T4 on Google Colab, fp32 (`PROFILE_DEVICE=cuda`) | 1,930 |
@@ -43,10 +43,15 @@ of this repository has a prebuilt `pt_ocl.so` attached: the native library of
 is a drop-in replacement for the `pt_ocl.so` inside the stock `pytorch_ocl`
 0.2.0 wheel (for `torch==2.4.0`, Python 3.12, x86-64 Linux), so you can get
 the fixes and the speed-up without building anything yourself; see
-[Using a release build](#using-a-release-build). The build is reproducible,
+[Using a release build](#using-a-release-build). From v1.3.0 on, a release
+also carries `pt_ocl-fixes-only.so`, built by `./build.sh fixes` with only the
+build and correctness fixes: the baseline every speed-up here and in the
+other BC-250 repositories is measured against, so those comparisons can be
+rerun; see [Reproducing the benchmarks](#reproducing-the-benchmarks). The build is reproducible,
 so a release can be checked by rebuilding at its tag and comparing `sha256sum`
 (kernel comments are compiled in, so later commits can change the hash). To ship
-a new build: run `./build.sh`, then tag a release with `pt_ocl.so` attached.
+a new build: run `./build.sh` and `./build.sh fixes`, then tag a release with
+`pt_ocl.so` and `pt_ocl-fixes-only.so` attached.
 
 ## Overview
 
@@ -183,10 +188,59 @@ loader installed.
    RUSTICL_ENABLE=radeonsi ~/ocl-venv/bin/python example.py
    ```
 
+To run the fixes-only baseline instead, do the same with
+`pt_ocl-fixes-only.so` from the release (v1.3.0 or later), installed under the
+name `pt_ocl.so`; see [Reproducing the benchmarks](#reproducing-the-benchmarks).
+
 Convolutions accept float32 tensors only (see `01-half-fixes`). The first run
 of each layer shape is slow because the kernels compile on first use; later
 runs read them from `~/.dlprimitives/cache.db`. For the optional fp16 inner
 loop, set `DLPRIM_CONV_FP16=1` before the first convolution runs.
+
+## Reproducing the benchmarks
+
+Every speed-up quoted here — and in
+[pytorch-gpu-bc250](https://github.com/mxreyer/pytorch-gpu-bc250) and the
+[write-up](https://mxreyer.github.io/blog/bc250-ml-box/) — compares the full
+series against a build with only the fixes that make `pytorch_ocl` build and
+run correctly on rusticl. Stock `pytorch_ocl` cannot serve as that baseline:
+its loss, softmax and BatchNorm kernels do not compile here (`00`), so a
+training step never completes. The baseline is therefore its own build:
+
+| | `pt_ocl-fixes-only.so` (`./build.sh fixes`) | `pt_ocl.so` (`./build.sh`) |
+| --- | --- | --- |
+| `dlprimitives` | `00`–`02` | `00`–`11` |
+| `pytorch_dlprim` | `01-half-fixes` | `01`, `02` |
+| ResNet-9 training, `tools/profile-step.py 128 50` | 916 img/s | 2,436 img/s |
+
+`02-gelu-mad` is left out of the baseline because it is a speed workaround
+(for Mesa < 26.2); ResNet-9 has no GELU, so it does not touch the measured step.
+The `03`–`11` performance patches are all off in the baseline, not just
+disabled via environment variables: the variables from `11` only reach part of
+the series.
+
+Both files are attached to each release from v1.3.0 on. To compare them on your
+own board, set up the venv as in [Using a release build](#using-a-release-build),
+then swap the library and clear the kernel cache before each run:
+
+```
+REL=https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases/download/v1.3.0
+SITE=~/ocl-venv/lib/python3.12/site-packages/pytorch_ocl
+curl -fL -O "$REL/pt_ocl.so" -O "$REL/pt_ocl-fixes-only.so"
+sha256sum pt_ocl.so pt_ocl-fixes-only.so   # compare with the release page
+
+for so in pt_ocl-fixes-only.so pt_ocl.so; do
+  install -m0644 "$so" "$SITE/pt_ocl.so"
+  rm -f ~/.dlprimitives/cache.db
+  echo "== $so"
+  RUSTICL_ENABLE=radeonsi ~/ocl-venv/bin/python tools/profile-step.py 128 50
+done
+```
+
+The first run of each build compiles its kernels, so repeat it (the README's
+figures are the median of five runs). To build the two files yourself instead,
+run `./build.sh fixes` and `./build.sh`; at a release tag, the `sha256sum`s
+match the release's (see [Building](#building)).
 
 ## Reverting
 
@@ -202,7 +256,8 @@ rm -f ~/.dlprimitives/cache.db
 ## Building
 
 ```
-./build.sh
+./build.sh          # all patches                  -> ./pt_ocl.so
+./build.sh fixes    # build/correctness fixes only -> ./pt_ocl-fixes-only.so
 ```
 
 Requires `python3.12`, `python3.12-devel`, `cmake`, `git`, `sqlite-devel`,
@@ -215,13 +270,15 @@ Requires `python3.12`, `python3.12-devel`, `cmake`, `git`, `sqlite-devel`,
    checked against its own pin), applies the patches. Bumping the pins
    is a deliberate step: re-check every `git apply`, rebuild, re-run
    `tools/wino-repro.py` and `tools/bn-check.py`.
-3. Builds and leaves the stripped extension at `./pt_ocl.so`.
+3. Builds and leaves the stripped extension at `./pt_ocl.so`
+   (`./pt_ocl-fixes-only.so` for `./build.sh fixes`, which applies only
+   `dlprimitives` `00`–`02` and `pytorch_dlprim` `01`).
 
 The build is reproducible: source paths are mapped out (`-ffile-prefix-map`)
 and no RPATH is embedded, so two runs at the pinned commits give byte-identical
 output. Shipped builds are attached to
 [GitHub releases](https://github.com/mxreyer/pytorch-dlprim-gfx1013/releases)
-as `pt_ocl.so`; anyone can check one by rebuilding at its tag and comparing
+as `pt_ocl.so` and, from v1.3.0, `pt_ocl-fixes-only.so`; anyone can check one by rebuilding at its tag and comparing
 `sha256sum`.
 
 ## Environment these numbers come from

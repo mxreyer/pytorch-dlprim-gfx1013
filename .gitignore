@@ -2,6 +2,7 @@
 /scratch/
 # build product; published as a release asset, not tracked
 /pt_ocl.so
+/pt_ocl-fixes-only.so
 # cached CPU reference gradients for tools/wino-repro.py
 /tools/wino-repro-refs*.pt
 __pycache__/
