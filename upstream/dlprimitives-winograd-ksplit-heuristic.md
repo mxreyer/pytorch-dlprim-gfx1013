@@ -30,14 +30,11 @@ it stays unsplit: 16 compute units busy, 24 idle for the duration of the
 kernel. A 64→128 layer launches 8 and does get split. A 40-SM T4 would behave
 the same way, with its threshold at 20.
 
-Measured on ResNet-9 (batch 128, six 3×3 layers), per training step: the
-backward-filter kernels drop from 55.3 ms to 46.1 ms, the two 128→128 layers
-nearly halve, and end-to-end throughput goes 909 → 972 img/s (+6.9%) with
-gradients unchanged to 1e-5 relative.
-
-The figures above are from the original investigation run. Re-measured
-patch by patch on the stacked series, the same step is 915 → 984 img/s; the
-README at https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
+Measured on ResNet-9 (batch 128, eight 3×3 layers of six shapes), per training
+step: the backward-filter kernels drop from 55.1 ms to 46.7 ms, the two 128→128
+layers nearly halve (8.0 → 4.4 ms each), and end-to-end throughput goes
+916 → 982 img/s (+7.2%) with gradients unchanged to 1e-5 relative. The README at
+https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
 
 ## Suggested fix
 
@@ -60,8 +57,9 @@ reduce_k_ = k_split_ > 1;
 
 with the launch's z-dimension set to `k_split_` instead of the fixed 8 — the
 kernel already derives its slice from `get_global_size(2)`, so it needs no
-change. Targets of 8, 16 and 32 per CU measured the same as 4 on this device,
-so the constant is not sensitive. Patch:
+change. With the rest of the series applied, a target of 8 per CU measures the
+same as 4 on this device and 16 and 32 about 1% slower, so the constant is not
+very sensitive. Patch:
 `patches/dlprimitives/03-winograd-ksplit-heuristic.patch` in
 https://github.com/mxreyer/pytorch-dlprim-gfx1013.
 

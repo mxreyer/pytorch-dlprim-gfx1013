@@ -14,9 +14,12 @@ produce the gradients the CPU does.
   RUSTICL_ENABLE=radeonsi DLPRIM_WINOGRAD_SPLIT_PLANES=0 \
       DLPRIM_WINOGRAD_BWD_PLANES=0 python3 tools/wino-repro.py 300
 
+  # a second argument sets the relative tolerance (default 2e-4).
+  RUSTICL_ENABLE=radeonsi python3 tools/wino-repro.py 900 1e-5
+
 Needs a torch + pytorch_ocl environment (build.sh at the top of this repository
 makes one in scratch/venv). CPU reference gradients are computed once and
-cached next to this script. ~1 minute per 100 sweeps.
+cached next to this script. ~1.6 minutes per 100 sweeps.
 
 MIT License, Copyright (c) 2026 mxreyer.
 """
@@ -51,6 +54,7 @@ def references():
 
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 200
+    tol = float(sys.argv[2]) if len(sys.argv) > 2 else TOL
     data = references()
     bad = {}
     for _ in range(n):
@@ -67,7 +71,7 @@ def main():
                                  ("dX", xo.grad.cpu(), dxref)):
                 e = ((got.double() - ref.double()).abs().max().item()
                      / ref.double().abs().max().item())
-                if e > TOL:
+                if e > tol:
                     key = f"{nm} {ci}->{co}@{H}"
                     bad[key] = bad.get(key, 0) + 1
             del xo, wo, yo

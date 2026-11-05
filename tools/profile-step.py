@@ -13,6 +13,9 @@ needed for ocl. On an NVIDIA GPU, e.g. a Colab T4:
 
   PROFILE_DEVICE=cuda python tools/profile-step.py 128 50
 
+PROFILE_MODE=infer times the forward pass alone, in eval mode under no_grad,
+instead of the training step (default PROFILE_MODE=train).
+
 Profiling forces per-kernel events and stretches the step by ~50%, so take the
 wall-clock number from an unprofiled run and only the breakdown from prof.csv
 (columns: section, kernel, start, end, duration in ms). This is the harness
@@ -23,6 +26,9 @@ MIT License, Copyright (c) 2026 mxreyer.
 """
 import os, sys, collections, csv, time, torch
 DEV = os.environ.get("PROFILE_DEVICE", "ocl:0")
+MODE = os.environ.get("PROFILE_MODE", "train")
+if MODE not in ("train", "infer"):
+    sys.exit(f"PROFILE_MODE must be train or infer, not {MODE}")
 if DEV.startswith("ocl"):
     import pytorch_ocl  # noqa: F401  (registers the "ocl" device)
 from torch import nn
@@ -76,14 +82,18 @@ model = ResNet9().to(dev)
 opt = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4, nesterov=True)
 lossfn = torch.nn.CrossEntropyLoss()
 x = torch.rand(B, 3, 32, 32, device=dev); y = torch.randint(0, 10, (B,), device=dev)
-def step():
+def train_step():
     loss = lossfn(model(x), y); opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
+def infer_step():
+    with torch.no_grad(): model(x)
+step = train_step if MODE == "train" else infer_step
+if MODE == "infer": model.eval()
 for _ in range(5): step()
 sync()
 t0 = time.perf_counter()
 for _ in range(N): step()
 sync(); wall = (time.perf_counter() - t0) / N
-print(f"{dev} batch {B}: {'profiled' if PROF else 'unprofiled'} step {wall*1e3:.1f} ms  = {B/wall:.0f} img/s")
+print(f"{dev} batch {B}: {'profiled' if PROF else 'unprofiled'} {MODE} step {wall*1e3:.1f} ms  = {B/wall:.0f} img/s")
 if PROF:
     with torch.ocl.profile(dev, OUT):
         for _ in range(N): step()

@@ -8,10 +8,11 @@ that the driver compiles exactly the kernels involved. Made for ISA dumps:
 
 Mesa needs BOTH a stage flag ("cs") and a type flag ("asm", "nir", "aco" ...) in
 AMD_DEBUG, and the shader cache must be off or nothing is compiled and nothing
-is printed. Kernels with "LDS: 40960 bytes" in their stats are the Winograd
-ones; they appear in the order forward, backward-data, backward-filter, each
-twice (two radeonsi variants). The dumps were made to read the Winograd
-kernels' register, LDS and scratch use.
+is printed. The Winograd kernels are the ones whose stats show "LDS: 40960 bytes"
+(forward) or 32768 (backward), or 20480 for all three with DLPRIM_CONV_FP16=1;
+they appear in the order forward, backward-data, backward-filter, each twice (two
+radeonsi variants). The dumps were made to read the Winograd kernels' register,
+LDS and scratch use.
 
 Arguments: batch channels_in channels_out spatial (default 128 256 512 8).
 

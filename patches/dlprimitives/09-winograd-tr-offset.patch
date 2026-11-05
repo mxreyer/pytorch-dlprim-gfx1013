@@ -20,20 +20,16 @@ __local (or a non-AMD device, which has STRIDE_OFFSET=1 and pays for the
 padding anyway) keeps the current behaviour.
 
 ResNet-9 training step, batch 128, AMD gfx1013 (40 CU, 64 KiB LDS),
-Mesa 26.1.8 rusticl, median GPU time per kernel over three profiled runs:
+Mesa 26.2.3 rusticl, median GPU time per kernel over three profiled runs:
 
-    winograd_bwd_filter    19.1 ms -> 14.9 ms
-    winograd_3x3_main_bwd  14.8 ms -> 12.1 ms
-    winograd_3x3_main      14.1 ms    (16.8 ms unpadded - left padded)
+    winograd_bwd_filter    19.3 ms -> 15.0 ms
+    winograd_3x3_main_bwd  13.4 ms -> 10.6 ms
+    winograd_3x3_main      13.3 ms    (14.4 ms unpadded - left padded)
 
-which is 60.6 -> 53.8 ms of GPU time per step, and 2,069 -> 2,330 img/s
+which is 58.5 -> 51.4 ms of GPU time per step, and 2,147 -> 2,439 img/s
 on the same step measured without profiling.
 
 Gradients unchanged: the define only moves data within __local.
-
-The figures above are from the original investigation run. Re-measured
-patch by patch on the stacked series, this step is 2,068 -> 2,261 img/s;
-the README at https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
 ---
  src/core/conv.cpp | 28 ++++++++++++++++++++++++++++
  1 file changed, 28 insertions(+)
@@ -55,8 +51,8 @@ index 01bad54..bd41563 100644
 +    // The existing local_mem_size check below drops the padding when it does
 +    // not fit at all; this drops it when it fits but costs half the occupancy.
 +    // Measured on an AMD gfx1013 (40 CU, 64 KiB LDS), ResNet-9 step at batch
-+    // 128: backward-filter 19.1 -> 14.9 ms, backward-data 14.8 -> 12.1 ms.
-+    // Forward is left padded - the same change costs it 14.1 -> 16.8 ms.
++    // 128: backward-filter 19.3 -> 15.0 ms, backward-data 13.4 -> 10.6 ms.
++    // Forward is left padded - the same change costs it 13.3 -> 14.4 ms.
 +    static bool drop_tr_padding(Context &ctx,int off)
 +    {
 +        // (XTILES_IN_WG + YTILES_IN_WG) * WG_K * 16 elements, and 16 * WG_K *

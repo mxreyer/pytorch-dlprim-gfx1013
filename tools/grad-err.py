@@ -1,5 +1,5 @@
 # conv2d Y/dW/dX relative error vs CPU fp32 for the ResNet-9 shapes; run with
-# and without DLPRIM_CONV_FP16=1 to see what the fp16 inner loop costs (Finding 11).
+# and without DLPRIM_CONV_FP16=1 to see what the fp16 inner loop costs.
 import torch, pytorch_ocl  # noqa
 for B,ci,co,H in [(128,64,128,32),(128,128,128,16),(128,128,256,16),(128,256,512,8),(128,512,512,4)]:
     g=torch.Generator().manual_seed(ci+co)

@@ -48,7 +48,7 @@ index 50b5f7f..63d08f8 100644
 +    // fp32 atomics) are on wherever has_native_atomic_addf() is false, i.e. on
 +    // the BC-250: each split-K slice accumulates into its own plane of the
 +    // workspace and a small reduce kernel sums the planes afterwards, for
-+    // under 2% of the kernel it replaces. Gradients are checked against CPU
++    // 1.6% of the atomic kernels' time. Gradients are checked against CPU
 +    // references by tools/wino-repro.py in mxreyer/pytorch-dlprim-gfx1013,
 +    // 300 sweeps of the six ResNet-9 3x3 layer shapes.
 +    //
@@ -64,8 +64,8 @@ index 50b5f7f..63d08f8 100644
      // fp32 rate on RDNA), with fp16 accumulation over one work-group's K
 -    // slice. Tensors in global memory stay fp32. Measured on an AMD gfx1013:
 +    // slice. Tensors in global memory stay fp32. Measured on the BC-250:
-     // forward 15.0 -> 8.9 ms, backward-data 16.0 -> 10.2, backward-filter
-     // 19.4 -> 12.4 per ResNet-9 step; Y/dX within ~0.5% of fp32, dW ~0.5%
+     // forward 13.3 -> 7.6 ms, backward-data 10.5 -> 8.1, backward-filter
+     // 15.0 -> 10.9 per ResNet-9 step; Y/dX within 0.9% of fp32, dW 0.7%
      // with the shorter K slices below. Off by default: fp32 callers get fp32.
      static bool conv_fp16()
      {
@@ -148,10 +148,10 @@ index 50b5f7f..63d08f8 100644
 -            // which is CU*64 on AMD and CU*128 on NVIDIA, so it only split
 -            // below CU/4 (AMD) or CU/2 (NVIDIA) work-groups: on a 40-CU part a
 -            // 128->128 layer ran its 16 work-groups unsplit with 24 CUs idle.
--            // Aim for ~4 work-groups per CU (8, 16 and 32 measured the same),
+-            // Aim for ~4 work-groups per CU (8 the same, 16 and 32 ~1% slower),
 -            // and never split a slice below 16 K items. With the fp16 inner
 -            // loop, shorter K slices halve the accumulation error (dW 1.1% ->
--            // 0.5%) at no measured cost.
+-            // 0.5%) for about 2.7% of the speed.
 +            // --- BC-250 investigation -------------------------------------
 +            // Stock rule: split the K (batch*tiles) reduction 8 ways only when
 +            // (C/32)*(N/32)*256 < estimated_core_count(). On a 40 CU AMD part
@@ -187,13 +187,13 @@ index 50b5f7f..63d08f8 100644
 +            }
 +            else {
 +                // aim for >= 4 work-groups per CU so the tail is cheap. More
-+                // splitting does not help (measured: targets of 8, 16 and 32
-+                // per CU, caps to 64, all within noise of this), the
++                // splitting does not help (measured: target 8 within noise of
++                // this, 16 and 32 ~1% slower, caps to 64 within noise), the
 +                // kernel is not short of work-groups. Overridable for
 +                // measurement: DLPRIM_WINOGRAD_KSPLIT_TARGET (per CU, default 4),
 +                // DLPRIM_WINOGRAD_KSPLIT_MAX (cap, default 16).
 +                // With the fp16 inner loop, shorter K slices halve the
-+                // accumulation error (dW 1.1% -> 0.5%) at no measured cost.
++                // accumulation error (dW 1.1% -> 0.5%) for about 2.7% of the speed.
 +                int per_cu = conv_fp16() ? 16 : 4, cap = conv_fp16() ? 64 : 16;
 +                if(char const *e = getenv("DLPRIM_WINOGRAD_KSPLIT_TARGET"))
 +                    per_cu = std::max(1,atoi(e));

@@ -9,7 +9,7 @@ read at a stride of C*64 bytes; on an AMD gfx1013 that alone was 39% of
 the forward kernel (measured by reading the wrong-but-coalesced address).
 Storing winconv_calc_gkgt_3x3's output [C][N] makes the read contiguous.
 
-Forward Winograd 24.4 -> 15.0 ms per ResNet-9 training step on gfx1013.
+Forward Winograd 24.3 -> 15.0 ms per ResNet-9 training step on gfx1013.
 ---
  src/kernels/winograd_fwd.cl | 9 +++++++--
  1 file changed, 7 insertions(+), 2 deletions(-)

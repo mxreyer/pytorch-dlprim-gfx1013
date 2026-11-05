@@ -35,9 +35,9 @@ single `toff = 1` buys one padded stride and pays the whole 8 KiB for it.
 
 Those 8 KiB are worth a resident work-group. Each compute unit has a fixed
 budget of `__local`, so a work-group that asks for more of it means fewer run
-at once. Measured on an AMD gfx1013 (40 CU, 64 KiB `__local`, Mesa 26.1.8
+at once. Measured on an AMD gfx1013 (40 CU, 64 KiB `__local`, Mesa 26.2.3
 rusticl) with a latency-bound probe that sweeps the allocation of a 256-item
-work-group and counts how many run concurrently on one CU: **32 KiB → 2.0,
+work-group and counts how many run concurrently on one CU: **32 KiB → 2.3,
 40 KiB → 1.2**. The padded work-group has a compute unit to itself.
 
 Half the machine is worth more than the bank conflicts the padding avoids —
@@ -46,17 +46,14 @@ kernel over three profiled runs:
 
 | kernel | padded (`TR_STRIDE_OFFSET=1`) | unpadded |
 | --- | ---: | ---: |
-| `winograd_bwd_filter` | 19.1 ms | **14.9 ms** |
-| `winograd_3x3_main_bwd` | 14.8 ms | **12.1 ms** |
-| `winograd_3x3_main` (forward) | **14.1 ms** | 16.8 ms |
+| `winograd_bwd_filter` | 19.3 ms | **15.0 ms** |
+| `winograd_3x3_main_bwd` | 13.4 ms | **10.6 ms** |
+| `winograd_3x3_main` (forward) | **13.3 ms** | 14.4 ms |
 
 The forward kernel goes the other way and should keep its padding. Per
-direction, that is 60.6 → 53.8 ms of GPU time per training step, and
-2,069 → 2,330 img/s on the same step measured without profiling.
-
-The step figures above are from the original investigation run. Re-measured
-patch by patch on the stacked series, the same step is 2,068 → 2,261 img/s;
-the README at https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
+direction, that is 58.5 → 51.4 ms of GPU time per training step, and
+2,147 → 2,439 img/s on the same step measured without profiling; the README at
+https://github.com/mxreyer/pytorch-dlprim-gfx1013 has the full table.
 
 ## Suggested fix
 
@@ -92,7 +89,7 @@ https://github.com/mxreyer/pytorch-dlprim-gfx1013.
 **This one depends on the rest of that series.** The numbers above were taken
 with it applied. Against the stock backward kernels — emulated `atomic_addf`
 and the current split-K rule — the same change is a large *loss* on the same
-device: 1,171 → 849 img/s. Those kernels are limited by the atomics rather
+device: 1,169 → 850 img/s. Those kernels are limited by the atomics rather
 than by how many work-groups are resident, so they pay the bank conflicts and
 collect none of the benefit. Whatever you make of the series, this define
 should not be changed on its own. The series is the subject of the

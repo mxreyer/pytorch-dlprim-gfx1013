@@ -16,7 +16,7 @@ Two changes to how winconv_3x3_bwd_filter reads its inputs:
   allocation) and mask the out-of-image columns; the 2x2 dy tile becomes
   one vload2 per row.
 
-Backward-filter Winograd 27.0 -> 19.4 ms per ResNet-9 training step on an
+Backward-filter Winograd 27.0 -> 19.3 ms per ResNet-9 training step on an
 AMD gfx1013.
 ---
  src/kernels/winograd_bwd_filter.cl | 72 ++++++++++++++++++------------
