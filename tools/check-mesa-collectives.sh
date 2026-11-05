@@ -56,13 +56,14 @@ for ref in "${REFS[@]}"; do
   dir="$WORKDIR/mesa-$ref"
   hr "Mesa $ref"
   if [ ! -d "$dir" ]; then
-    if ! git clone -q --depth 1 --filter=blob:none --sparse --branch "$ref" \
+    if ! git -c advice.detachedHead=false clone -q --depth 1 --filter=blob:none --sparse --branch "$ref" \
          "$MESA_URL" "$dir"; then
       echo "  clone of $ref failed (no access to gitlab.freedesktop.org, or no such ref)"
       continue
     fi
+    # Cone mode takes directories only; top-level files (VERSION) come anyway.
     git -C "$dir" sparse-checkout set src/gallium/frontends/rusticl src/compiler/clc \
-      src/compiler/spirv src/compiler/nir meson.build meson_options.txt VERSION
+      src/compiler/spirv src/compiler/nir
   fi
   echo "  commit: $(git -C "$dir" log -1 --format='%h %cs %s')"
   echo "  VERSION: $(cat "$dir/VERSION" 2>/dev/null)"

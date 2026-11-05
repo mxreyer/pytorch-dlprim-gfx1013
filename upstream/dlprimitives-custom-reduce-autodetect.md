@@ -35,9 +35,12 @@ report OpenCL 3.x and still not have them, and that is exactly what happens
 here: rusticl reports OpenCL 3.1 but does not list
 `__opencl_c_work_group_collective_functions` in `CL_DEVICE_OPENCL_C_FEATURES`
 (verified on Mesa 26.1.8, 26.2.2 and 26.2.3, radeonsi gfx1013 — on 26.2.3 the
-feature list has ten entries, none of them a collective), and as of LLVM 22
-no libclc build implements the functions either (LLVM 23's libclc adds them).
-So the version check passes, and the built-ins are simply not there.
+feature list has ten entries, none of them a collective). That does not
+depend on libclc: Mesa's kernel compiler starts from `-all` and re-enables only
+the features rusticl lists (`src/compiler/clc/clc_helpers.cpp`, Mesa 26.2.3
+and main), so clang never declares the built-ins. As of LLVM 22 no libclc
+build implements them either (LLVM 23's libclc adds them). So the version
+check passes, and the built-ins are simply not there.
 
 `reduce.h` already contains a fallback that computes the same reductions
 through `__local` memory and `barrier()`, in plain OpenCL 1.2, behind
