@@ -111,14 +111,14 @@ echo "== building =="
 # parallel build swaps itself to a crawl. Override with JOBS=N if you have more.
 make -j"${JOBS:-4}"
 
-echo "== installing pt_ocl.so next to this script =="
-install -m0644 "$SCRATCH/build/pytorch_ocl/pt_ocl.so" "$HERE/pt_ocl.so"
-strip --strip-unneeded "$HERE/pt_ocl.so"
+echo "== installing $OUT next to this script =="
+install -m0644 "$SCRATCH/build/pytorch_ocl/pt_ocl.so" "$HERE/$OUT"
+strip --strip-unneeded "$HERE/$OUT"
 
 echo
-echo "Built and staged: $HERE/pt_ocl.so"
+echo "Built and staged: $HERE/$OUT"
 echo "  - to try it in the scratch venv:"
-echo "      install -m0644 '$HERE/pt_ocl.so' '$VENV/lib/python3.12/site-packages/pytorch_ocl/pt_ocl.so'"
+echo "      install -m0644 '$HERE/$OUT' '$VENV/lib/python3.12/site-packages/pytorch_ocl/pt_ocl.so'"
 echo "      rm -f ~/.dlprimitives/cache.db   # old cache keyed to the old kernel source"
 echo "      RUSTICL_ENABLE=radeonsi '$VENV/bin/python' '$HERE/tools/wino-repro.py' 10"
 echo "  - to ship it: sha256sum $OUT, attach to a GitHub release"
