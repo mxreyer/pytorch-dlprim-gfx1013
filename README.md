@@ -12,7 +12,9 @@ the OpenCL backend for PyTorch) work correctly and run fast on the AsRock
 BC-250's gfx1013 GPU under Mesa's rusticl driver. Also contributes and opt-in fp16
 inner loop for further speed-up.
 
-The target performance for this investigation was that of a cloud T4, which the BC-250 matches on paper when operated at 40 CUs / 2.0 GHz.
+The target performance for this investigation was that of a cloud T4, which
+the BC-250, operated at 40 CUs / 2.0 GHz, beats by about 25% in peak fp32 on
+paper.
 Peak fp32 is 40 CUs × 64 lanes × 2 FLOP per FMA × 2.0 GHz = 10.2 TFLOP/s for
 the BC-250, against 2,560 CUDA cores × 2 FLOP × 1.59 GHz boost = 8.1 TFLOP/s
 for the T4.
