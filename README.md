@@ -13,6 +13,9 @@ BC-250's gfx1013 GPU under Mesa's rusticl driver. Also contributes and opt-in fp
 inner loop for further speed-up.
 
 The target performance for this investigation was that of a cloud T4, which the BC-250 matches on paper when operated at 40 CUs / 2.0 GHz.
+Peak fp32 is 40 CUs × 64 lanes × 2 FLOP per FMA × 2.0 GHz = 10.2 TFLOP/s for
+the BC-250, against 2,560 CUDA cores × 2 FLOP × 1.59 GHz boost = 8.1 TFLOP/s
+for the T4.
 Stock `pytorch_ocl`, however, trained ResNet-9 at under half the T4's rate.
 The patches from this repo close that gap and pass the T4 in fp32. All
 figures below are measured by `tools/profile-step.py`, which times the
