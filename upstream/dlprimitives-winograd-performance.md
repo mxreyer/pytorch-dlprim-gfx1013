@@ -65,7 +65,7 @@ timing a wrong-but-cheap variant of one stage:
 - `07-bn-sums-grid-stride`: a grid-stride reduction loop instead of one
   contiguous chunk per work-item. With 512 channels at 8×8, the chunked
   version put every second lane 128 KB apart, so they kept landing in the same
-  cache sets and the kernel ran at 13 GB/s on a 351 GB/s machine. BatchNorm
+  cache sets and the kernel ran at 13 GB/s on a machine rated for 448 GB/s. BatchNorm
   9.3 → 4.4 ms per step.
 
 These are plain coalescing changes and should help everywhere, but they touch
